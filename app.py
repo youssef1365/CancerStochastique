@@ -744,10 +744,12 @@ elif page == "State Explorer":
             st.plotly_chart(fig, use_container_width=True)
 
             st.dataframe(
-                chart[["state_to", "probability"]].rename(columns={
+                details[["state_to", "probability"]]
+                .rename(columns={
                     "state_to": "Next state",
                     "probability": "Probability",
-                }),
+                })
+                .sort_values("Probability", ascending=False),
                 use_container_width=True,
             )
 
