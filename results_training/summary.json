@@ -1,0 +1,24 @@
+{
+  "algorithm": "double_q_learning",
+  "episodes_requested": 10000,
+  "episodes_recorded": 10000,
+  "dataset": {
+    "path": "data/cancer_treatment_dataset.csv",
+    "n_transitions": 249258,
+    "n_patients": 25000
+  },
+  "training": {
+    "seconds": 25.496692700020503,
+    "final_epsilon": 0.01,
+    "mean_Q": 17.25087841632715,
+    "max_Q": 45.42599113312323,
+    "mean_max_Q": 26.351047788818306,
+    "logged_action_match_rate": 0.21819560455431722
+  },
+  "mas_evaluation": {
+    "n_samples": 100,
+    "recorded_action_match_rate": 0.29,
+    "unanimous_consensus_rate": 0.68,
+    "q_proposal_accepted_rate": 1.0
+  }
+}
