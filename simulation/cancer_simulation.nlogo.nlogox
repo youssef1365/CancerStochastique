@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <model version="NetLogo 7.0.4" snapToGrid="true">
-  <code><![CDATA[extensions [ csv ]
+  <code><![CDATA[
+extensions [csv]
 
 globals [
-  simulation-ticks
   q-policy
+  double-q-policy
   transition-matrix
+  active-policy
+  initial-patient-states
+  max-simulation-ticks
+  matrix-action
 ]
 
 turtles-own [
@@ -18,202 +23,548 @@ turtles-own [
   patient-alive?
 ]
 
+patches-own [
+  matrix-value
+]
+
+; =========================================================
+; SETUP
+; =========================================================
+
 to setup
   clear-all
 
+  set q-policy []
+  set double-q-policy []
+  set transition-matrix []
+  set initial-patient-states []
+  set active-policy "Q-Learning"
+  set max-simulation-ticks 100
+  set matrix-action 0
+
+  resize-world 0 63 0 31
+
   load-q-policy
-  set simulation-ticks 0
+  load-double-q-policy
   load-transition-matrix
 
+  create-patients
+  save-initial-patients
+
+  update-matrix-heatmap
+  update-visualization
+
+  reset-ticks
+end
+
+
+to create-patients
+  let valid-states filter [
+    s -> s != 6 and s != 27 and
+    not empty? (supported-actions-for s)
+  ] (range 32)
+
+  if empty? valid-states [
+    user-message "No valid starting states were found. Check the transition matrix."
+    stop
+  ]
+
   create-turtles 10 [
-    setxy random-xcor random-ycor
     set shape "person"
-    set color blue
+    set size 1.2
 
-    set D 0
-    set P 0
-    set U 3
-    set B 0
+    ; Reserve the right side of the world for patients.
+    setxy (40 + random 24) random 32
 
-    set state-id (D * 16 + P * 8 + U * 2 + B)
+    set state-id one-of valid-states
+    decode-current-state
+
     set selected-action -1
     set patient-alive? true
+    set label-color white
+  ]
+end
+
+
+to decode-current-state
+  set D floor (state-id / 16)
+  set P floor ((state-id mod 16) / 8)
+  set U floor ((state-id mod 8) / 2)
+  set B state-id mod 2
+end
+
+
+; =========================================================
+; SAVE AND RESTORE THE SAME INITIAL PATIENTS
+; =========================================================
+
+to save-initial-patients
+  set initial-patient-states map [
+    t -> (list
+      [who] of t
+      [state-id] of t
+      [patient-alive?] of t
+      [xcor] of t
+      [ycor] of t)
+  ] (sort turtles)
+end
+
+
+to restore-initial-patients
+  if empty? initial-patient-states [
+    user-message "Run setup before restoring patients."
+    stop
+  ]
+
+  clear-all-plots
+
+  ask turtles [
+    let snapshot item who initial-patient-states
+
+    set state-id item 1 snapshot
+    set patient-alive? item 2 snapshot
+    setxy (item 3 snapshot) (item 4 snapshot)
+
+    set selected-action -1
+    decode-current-state
   ]
 
   reset-ticks
   update-visualization
+  update-matrix-heatmap
 end
 
+
+; =========================================================
+; MAIN SIMULATION
+; =========================================================
 
 to go
   if not any? turtles with [patient-alive?] [
     stop
   ]
 
-  ask turtles with [patient-alive?] [
-    let current-state state-id
-    let result filter [row -> item 0 row = current-state] q-policy
+  if ticks >= max-simulation-ticks [
+    stop
+  ]
 
-    ifelse empty? result [
+  let selected-policy q-policy
+
+  if active-policy = "Double Q-learning" [
+    set selected-policy double-q-policy
+  ]
+
+  ask turtles with [patient-alive?] [
+    let matching-rows filter [
+      row -> item 0 row = state-id
+    ] selected-policy
+
+    ifelse empty? matching-rows [
       set selected-action -1
     ] [
-      set selected-action item 1 first result
+      set selected-action item 1 first matching-rows
     ]
 
-    if selected-action >= 0 and selected-action <= 6 [
-      set state-id next-state-for current-state selected-action
+    ; Use a supported action if the learned policy has no
+    ; usable action for this state.
+    if not member? selected-action (supported-actions-for state-id) [
+      let available-actions supported-actions-for state-id
+
+      ifelse empty? available-actions [
+        set selected-action -1
+      ] [
+        set selected-action first available-actions
+      ]
     ]
 
-    ;; Replace this condition if your model uses a different
-    ;; encoding for terminal/deceased states.
-    if state-id = 31 [
-      set patient-alive? false
+    if selected-action != -1 [
+      let next-state next-state-for state-id selected-action
+
+      set state-id next-state
+      decode-current-state
+
+      if member? state-id [6 27] [
+        set patient-alive? false
+      ]
     ]
   ]
+
+  update-visualization
+  update-matrix-heatmap
 
   tick
-  set simulation-ticks ticks
-  update-visualization
 end
 
 
-to load-q-policy
-  let rows csv:from-file "../results_training/netlogo/q_learning_policy.csv"
-  set q-policy []
-  foreach but-first rows [ row ->
-    let s item 0 row
-    let a item 5 row
-    set q-policy lput (list s a) q-policy
+; =========================================================
+; POLICY SELECTION AND TESTING
+; =========================================================
+
+to choose-policy
+  ifelse active-policy = "Q-Learning" [
+    set active-policy "Double Q-learning"
+  ] [
+    set active-policy "Q-Learning"
   ]
-  show (word "Q-Learning policy loaded: " length q-policy " states")
+
+  print (word "Active policy: " active-policy)
 end
+
 
 to test-q-policy
-  let result filter [ row -> item 0 row = 6 ] q-policy
-
-  ifelse empty? result [
-    show "ERROR: State 6 not found"
-  ] [
-    show (word "State 6 — selected action: " item 1 first result)
-  ]
+  display-policy q-policy "Q-Learning"
 end
 
-to select-q-actions
-  ask turtles [
-    let result filter [row -> item 0 row = state-id] q-policy
 
-    ifelse empty? result [
-      set selected-action -1
-    ] [
-      set selected-action item 1 first result
+to test-double-q-policy
+  display-policy double-q-policy "Double Q-learning"
+end
+
+
+to display-policy [policy policy-name]
+  print (word "========== " policy-name " ==========")
+
+  foreach (range 32) [
+    s ->
+    if s != 6 and s != 27 [
+      let matching-rows filter [
+        row -> item 0 row = s
+      ] policy
+
+      ifelse empty? matching-rows [
+        print (word "State " s ": no policy entry")
+      ] [
+        print (word
+          "State " s
+          " -> Action "
+          item 1 first matching-rows
+          " ("
+          action-name (item 1 first matching-rows)
+          ")")
+      ]
     ]
   ]
-  show "Patients have selected actions using the Q-Learning policy."
 end
 
+
+; =========================================================
+; LOAD POLICY CSV FILES
+; =========================================================
+
+to load-q-policy
+  let rows csv:from-file
+    "../results_training/netlogo/q_learning_policy.csv"
+set q-policy map [
+  row -> (list
+    (item 0 row)
+    (item 5 row))
+    ] (filter [
+      row -> length row > 5
+  ] (but-first rows))
+
+  print (word "Q-learning policy loaded: " length q-policy " states")
+end
+
+
+to load-double-q-policy
+  let rows csv:from-file
+    "../results_training/netlogo/double_q_learning_policy.csv"
+
+  set double-q-policy map [
+  row -> (list
+    (item 0 row)
+    (item 5 row))
+    ] (filter [
+      row -> length row > 5
+  ] (but-first rows))
+
+  print (word "Double Q-learning policy loaded: "
+    length double-q-policy " states")
+end
+
+
+; =========================================================
+; LOAD TRANSITION MATRIX CSV
+; Expected columns:
+; action, state_from, state_to, count, probability
+; =========================================================
 
 
 to load-transition-matrix
-  let rows csv:from-file "../results_training/netlogo/transition_matrices.csv"
-  set transition-matrix but-first rows
+  let rows csv:from-file
+    "../results_training/netlogo/transition_matrices.csv"
 
-  show (word "Transition records loaded: "
+  set transition-matrix map [
+    row -> (list
+      (item 0 row)
+      (item 1 row)
+      (item 2 row)
+      (item 3 row)
+      (item 4 row))
+  ] (filter [
+    row -> length row > 4
+  ] (but-first rows))
+
+  print (word "Transition records loaded: "
     length transition-matrix)
 end
 
 
+; =========================================================
+; ACTIONS
+; =========================================================
 
+to-report action-name [action-id]
+  if action-id = 0 [ report "Observation" ]
+  if action-id = 1 [ report "Surgery" ]
+  if action-id = 2 [ report "Chemotherapy" ]
+  if action-id = 3 [ report "Radiation" ]
+  if action-id = 4 [ report "Immunotherapy" ]
+  if action-id = 5 [ report "Combination" ]
+  if action-id = 6 [ report "Palliative" ]
+
+  report "Unknown"
+end
+
+
+to-report supported-actions-for [current-state]
+  let matching-rows filter [
+    row ->
+    item 1 row = current-state and item 4 row > 0
+  ] transition-matrix
+
+  report remove-duplicates map [
+    row -> item 0 row
+  ] matching-rows
+end
+
+
+; =========================================================
+; SAMPLE THE NEXT STATE USING TRANSITION PROBABILITIES
+; =========================================================
 
 to-report next-state-for [current-state chosen-action]
-  let candidates filter [row ->
-    (read-from-string (word item 0 row)) = chosen-action and
-    (read-from-string (word item 1 row)) = current-state and
-    (read-from-string (word item 4 row)) > 0
+  let candidates filter [
+    row ->
+    item 0 row = chosen-action and
+    item 1 row = current-state and
+    item 4 row > 0
   ] transition-matrix
 
   if empty? candidates [
-    show (word "No transition found: state=" current-state
-      ", action=" chosen-action)
     report current-state
   ]
 
-  let total-prob sum (map [row ->
-    read-from-string (word item 4 row)
-  ] candidates)
+  let total-probability sum map [
+    row -> item 4 row
+  ] candidates
 
-  let draw random-float total-prob
-  let cumulative 0
-
-  foreach candidates [row ->
-    set cumulative cumulative +
-      read-from-string (word item 4 row)
-
-    if draw < cumulative [
-      report read-from-string (word item 2 row)
-    ]
+  if total-probability <= 0 [
+    report current-state
   ]
 
-  report read-from-string (word item 2 last candidates)
+  let roll random-float total-probability
+  let cumulative 0
+  let index 0
+
+  while [index < length candidates] [
+    let current-row item index candidates
+
+    set cumulative cumulative + item 4 current-row
+
+    if roll < cumulative [
+      report item 2 current-row
+    ]
+
+    set index index + 1
+  ]
+
+  report item 2 last candidates
 end
 
 
-
-
-
+; =========================================================
+; LIVE PATIENT VISUALIZATION
+; =========================================================
 
 to update-visualization
   ask turtles [
-    set label state-id
+    set label (word state-id)
+    set label-color white
 
-    ifelse not patient-alive? [
-      set color gray
+    ifelse patient-alive? [
+      set color scale-color blue state-id 31 0
     ] [
-      set color scale-color blue state-id 0 31
+      set color gray
     ]
   ]
 end
 
 
+; =========================================================
+; TRANSITION MATRIX HEATMAP
+; X AXIS = START STATE
+; Y AXIS = NEXT STATE
+; =========================================================
 
+to update-matrix-heatmap
+  ask patches with [
+    pxcor >= 0 and pxcor <= 31 and
+    pycor >= 0 and pycor <= 31
+  ] [
+    let from-state pxcor
+    let to-state pycor
 
+    set matrix-value transition-probability
+      from-state to-state matrix-action
 
-
-to export-simulation-results
-  let filename "../results_training/netlogo/simulation_results.csv"
-
-  file-open filename
-  file-print "tick,total_patients,active_patients,inactive_patients,average_state"
-
-  while [any? turtles with [patient-alive?]] [
-    let active count turtles with [patient-alive?]
-    let inactive count turtles with [not patient-alive?]
-    let avg-state ifelse-value (count turtles > 0)
-      [mean [state-id] of turtles]
-      [0]
-
-    file-print (word ticks "," count turtles "," active ","
-      inactive "," avg-state)
-
-    go
+    ifelse matrix-value > 0 [
+      set pcolor scale-color green matrix-value 1 0
+    ] [
+      set pcolor black
+    ]
   ]
 
-  file-close
-  show (word "Results exported to " filename)
+  ; The patient area is kept separate from the heatmap.
+  ask patches with [pxcor >= 32] [
+    set pcolor 9.9
+  ]
 end
 
 
+to-report transition-probability [
+  from-state to-state action-id
+]
+  let matching-rows filter [
+    row ->
+    item 0 row = action-id and
+    item 1 row = from-state and
+    item 2 row = to-state and
+    item 4 row > 0
+  ] transition-matrix
+
+  if empty? matching-rows [
+    report 0
+  ]
+
+  report sum map [
+    row -> item 4 row
+  ] matching-rows
+end
+
+
+to next-matrix-action
+  set matrix-action (matrix-action + 1) mod 7
+  update-matrix-heatmap
+  print (word "Matrix action: " action-name matrix-action)
+end
+
+
+to previous-matrix-action
+  set matrix-action (matrix-action + 6) mod 7
+  update-matrix-heatmap
+  print (word "Matrix action: " action-name matrix-action)
+end
+
+
+; =========================================================
+; POLICY COMPARISON
+; =========================================================
+
+to-report run-policy [policy-name seed-value]
+  set active-policy policy-name
+
+  restore-initial-patients
+  random-seed seed-value
+
+  while [
+    any? turtles with [patient-alive?] and
+    ticks < max-simulation-ticks
+  ] [
+    go
+  ]
+
+  let total count turtles
+  let terminal count turtles with [not patient-alive?]
+  let active count turtles with [patient-alive?]
+  let terminal-percent 0
+  let active-percent 0
+  let average-final-state 0
+
+  if total > 0 [
+    set terminal-percent (100 * terminal / total)
+    set active-percent (100 * active / total)
+    set average-final-state mean [state-id] of turtles
+  ]
+
+  report (list
+    ticks
+    total
+    terminal
+    terminal-percent
+    active
+    active-percent
+    average-final-state)
+end
+
+
+to compare-policies
+  if empty? initial-patient-states [
+    user-message "Run setup before comparing policies."
+    stop
+  ]
+
+  file-open "../results_training/netlogo/policy_comparison.csv"
+
+  file-print
+    "policy,ticks,total_patients,terminal_patients,terminal_percent,active_patients,active_percent,average_final_state"
+
+  let q-results run-policy "Q-Learning" 12345
+
+  file-print (csv:to-row
+    (sentence (list "Q-Learning") q-results))
+
+  let double-results run-policy "Double Q-learning" 12345
+
+  file-print (csv:to-row
+    (sentence (list "Double Q-learning") double-results))
+
+  file-close
+
+  set active-policy "Double Q-learning"
+  update-visualization
+  update-matrix-heatmap
+
+  print "Comparison complete."
+  print "Saved: ../results_training/netlogo/policy_comparison.csv"
+end
+
+
+; =========================================================
+; RESET THE SIMULATION
+; =========================================================
+
+to reset-simulation
+  restore-initial-patients
+  set active-policy "Q-Learning"
+  set matrix-action 0
+  update-visualization
+  update-matrix-heatmap
+end
 ]]></code>
   <widgets>
-    <view x="440" wrappingAllowedX="true" y="15" frameRate="30.0" minPycor="-16" height="534" showTickCounter="true" patchSize="16.061" fontSize="10" wrappingAllowedY="true" width="534" tickCounterLabel="ticks" maxPycor="16" updateMode="0" maxPxcor="16" minPxcor="-16"></view>
+    <view x="440" wrappingAllowedX="true" y="15" frameRate="30.0" minPycor="0" height="517" showTickCounter="true" patchSize="16.061" fontSize="10" wrappingAllowedY="true" width="1031" tickCounterLabel="ticks" maxPycor="31" updateMode="0" maxPxcor="63" minPxcor="0"></view>
     <button x="15" y="20" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="100" display="Setup">setup</button>
     <button x="130" y="20" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="105" display="Go">go</button>
     <button x="250" y="20" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="110" display="Test Q Policy">test-q-policy</button>
-    <button x="15" y="90" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="105" display="Select Q Actions">select-q-actions</button>
-    <monitor x="10" precision="17" y="305" height="60" fontSize="11" width="100" display="Active patients">count turtles with [patient-alive?]</monitor>
-    <monitor x="10" precision="17" y="215" height="60" fontSize="11" width="145" display="Current simulation time">ticks</monitor>
-    <monitor x="325" precision="17" y="215" height="60" fontSize="11" width="100" display="Total Patients">count turtles</monitor>
-    <monitor x="180" precision="17" y="215" height="60" fontSize="11" width="115" display="Patients in state 6">count turtles with [state-id = 6]</monitor>
-    <monitor x="130" precision="17" y="305" height="60" fontSize="11" width="105" display="Inactive patients">count turtles with [not patient-alive?]</monitor>
+    <button x="15" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="90" display="Switch Policy">choose-policy</button>
+    <button x="120" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="130" display="Test Double-Q Policy">test-double-q-policy</button>
+    <button x="270" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="140" display="Compare Both Policies">compare-policies</button>
+    <monitor x="65" precision="17" y="140" height="60" fontSize="11" width="115" display="Patients in state 6">count turtles with [state-id = 6]</monitor>
+    <monitor x="210" precision="17" y="140" height="60" fontSize="11" width="100" display="Total Patients">count turtles</monitor>
+    <monitor x="65" precision="17" y="205" height="60" fontSize="11" width="245" display="Current simulation time">ticks</monitor>
+    <monitor x="205" precision="17" y="270" height="60" fontSize="11" width="105" display="Inactive patients">count turtles with [not patient-alive?]</monitor>
+    <monitor x="65" precision="17" y="270" height="60" fontSize="11" width="100" display="Active patients">count turtles with [patient-alive?]</monitor>
   </widgets>
   <info>## WHAT IS IT?
 

@@ -318,13 +318,15 @@ st.sidebar.caption("Multi-agent research simulation")
 page = st.sidebar.radio(
     "NAVIGATION",
     [
+        "Patient Assessment",
         "Overview",
-        "Transition Matrices",
         "Policy Comparison",
-        "State Explorer",
         "Simulation Lab",
+        "Transition Matrices",
+        "State Explorer",
         "Data & Diagnostics",
     ],
+    index=0,
 )
 
 st.sidebar.divider()
@@ -364,6 +366,33 @@ def transitions_for(state_id, action_id):
         (transitions["state_from"] == int(state_id))
         & (transitions["action_id"] == int(action_id))
     ].sort_values("probability", ascending=False)
+
+
+def map_patient_to_state(cancer_type, stage, metastatic_site, status, treatment_history):
+    """Map user-entered synthetic scenario data to the project's encoded state."""
+    stage_index = {"I": 0, "II": 1, "III": 2, "IV": 3}[stage]
+    has_metastasis = metastatic_site != "None"
+    deceased = status == "Deceased"
+
+    # Simplified project mapping rules.
+    d = int(stage_index >= 2 or has_metastasis)
+    p = int(deceased or (stage == "IV" and metastatic_site in {"Brain", "Multiple"}))
+
+    if treatment_history == "None":
+        u = 0
+    elif deceased or stage == "IV":
+        u = 1
+    elif stage == "III":
+        u = 2
+    else:
+        u = 3
+
+    b = int(
+        metastatic_site == "Multiple"
+        or (treatment_history == "3 or more" and has_metastasis)
+    )
+    state_id = int(d * 16 + p * 8 + u * 2 + b)
+    return state_id, {"D": d, "P": p, "U": u, "B": b}
 
 
 def show_missing_files():
@@ -461,6 +490,187 @@ if page == "Overview":
                 c.metric("Reward observations", f"{len(rewards):,}")
     else:
         st.info("The dataset was not found. Policy and matrix pages may still work.")
+
+
+# ---------------------------------------------------------
+# PAGE: PATIENT ASSESSMENT
+# ---------------------------------------------------------
+
+elif page == "Patient Assessment":
+    st.title("Patient Scenario Assessment")
+    st.write(
+        "Start here: enter a synthetic patient scenario. The app maps the inputs "
+        "to one of the model's 32 states, then looks up the existing Q-Learning "
+        "and Double Q-Learning policies."
+    )
+    st.warning(
+        "Educational research prototype only. The output is generated from "
+        "synthetic model rules and learned policy files. It is not a clinical "
+        "assessment or a real treatment recommendation. Do not enter identifiable "
+        "or real patient information."
+    )
+
+    with st.form("patient_assessment_form"):
+        st.subheader("Scenario information")
+        c1, c2 = st.columns(2)
+        with c1:
+            cancer_type = st.selectbox(
+                "Cancer type", ["Lung", "Breast", "Colorectal", "Prostate"]
+            )
+            stage = st.selectbox("Cancer stage", ["I", "II", "III", "IV"])
+            status = st.selectbox(
+                "Status in the scenario",
+                ["Alive", "Unknown", "Deceased"],
+                help="Used only by the project's simplified synthetic state mapping.",
+            )
+        with c2:
+            metastatic_site = st.selectbox(
+                "Metastatic status/site",
+                ["None", "Bone", "Liver", "Lung", "Brain", "Multiple"],
+            )
+            treatment_history = st.selectbox(
+                "Previous treatment history", ["None", "1–2", "3 or more"]
+            )
+            policy_choice = st.selectbox(
+                "Policy to inspect",
+                ["Compare both", "Q-Learning", "Double Q-Learning"],
+            )
+
+        submitted = st.form_submit_button(
+            "Analyze scenario", type="primary", use_container_width=True
+        )
+
+    if submitted:
+        state_id, decoded = map_patient_to_state(
+            cancer_type, stage, metastatic_site, status, treatment_history
+        )
+        st.session_state["assessed_scenario"] = {
+            "cancer_type": cancer_type,
+            "stage": stage,
+            "status": status,
+            "metastatic_site": metastatic_site,
+            "treatment_history": treatment_history,
+            "policy_choice": policy_choice,
+            "state_id": state_id,
+            "decoded": decoded,
+        }
+
+    scenario = st.session_state.get("assessed_scenario")
+    if scenario:
+        state_id = scenario["state_id"]
+        decoded = scenario["decoded"]
+        st.divider()
+        st.subheader("1. Encoded model state")
+        a, b, c = st.columns(3)
+        a.metric("Encoded state ID", state_id)
+        b.metric("State space", "32 possible states")
+        c.metric("Scenario status", scenario["status"])
+        st.caption(
+            f"Scenario: {scenario['cancer_type']} cancer · Stage {scenario['stage']} · "
+            f"Metastasis: {scenario['metastatic_site']} · "
+            f"Previous treatments: {scenario['treatment_history']}"
+        )
+
+        cols = st.columns(4)
+        labels = {
+            "D": "Diagnosis category",
+            "P": "Progression category",
+            "U": "Treatment utility",
+            "B": "Biological response",
+        }
+        for col, key in zip(cols, ["D", "P", "U", "B"]):
+            col.metric(key, decoded[key])
+            col.caption(labels[key])
+        st.code(
+            f"S = 16D + 8P + 2U + B = 16×{decoded['D']} + "
+            f"8×{decoded['P']} + 2×{decoded['U']} + {decoded['B']} = {state_id}",
+            language="text",
+        )
+
+        st.subheader("2. Learned policy outputs")
+        if scenario["status"] == "Deceased":
+            st.error(
+                "This scenario is marked deceased. Policy data is shown only for "
+                "research transparency; no treatment recommendation is presented."
+            )
+
+        q_action = policy_action(q_policy, state_id)
+        double_action = policy_action(double_policy, state_id)
+        selected_names = (
+            ["Q-Learning", "Double Q-Learning"]
+            if scenario["policy_choice"] == "Compare both"
+            else [scenario["policy_choice"]]
+        )
+        result_cols = st.columns(len(selected_names))
+        for col, policy_name in zip(result_cols, selected_names):
+            policy = q_policy if policy_name == "Q-Learning" else double_policy
+            action_id = q_action if policy_name == "Q-Learning" else double_action
+            with col:
+                st.markdown(f"#### {policy_name}")
+                if policy is None:
+                    st.error("Policy file is unavailable or could not be parsed.")
+                elif action_id is None:
+                    st.warning("No action is recorded for this state.")
+                elif scenario["status"] == "Deceased":
+                    st.metric("Stored policy action ID", action_id)
+                    st.write(f"Stored action: **{ACTIONS[action_id]}**")
+                    st.caption("For model inspection only.")
+                else:
+                    st.metric("Policy-selected simulation action", ACTIONS[action_id])
+                    st.caption(
+                        f"Action ID: {action_id}. This is a learned simulation output, "
+                        "not a clinically validated treatment recommendation."
+                    )
+                    details = transitions_for(state_id, action_id)
+                    if details.empty:
+                        st.info(
+                            "No observed transition exists for this state/action pair. "
+                            "The app does not invent transitions."
+                        )
+                    else:
+                        fig = px.bar(
+                            details,
+                            x="state_to",
+                            y="probability",
+                            title=f"Next-state probabilities — {policy_name}",
+                            labels={"state_to": "Next state", "probability": "Probability"},
+                            color="probability",
+                            color_continuous_scale="Teal",
+                        )
+                        fig.update_layout(
+                            template="plotly_dark", yaxis_range=[0, 1], showlegend=False
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                        display = details[["state_to", "probability"]].rename(
+                            columns={"state_to": "Next state", "probability": "Probability"}
+                        )
+                        st.dataframe(
+                            display.sort_values("Probability", ascending=False),
+                            use_container_width=True,
+                        )
+
+        if scenario["policy_choice"] == "Compare both":
+            st.subheader("3. Policy agreement")
+            if q_action is None or double_action is None:
+                st.info("Cannot compare: one or both policies have no action for this state.")
+            elif q_action == double_action:
+                st.success(f"Both policies select {ACTIONS[q_action]}.")
+            else:
+                st.info(
+                    f"Policies differ: Q-Learning selects {ACTIONS[q_action]}, "
+                    f"while Double Q-Learning selects {ACTIONS[double_action]}."
+                )
+
+        with st.expander("State mapping rules used by this form"):
+            st.markdown(
+                "- **D = 1** for stage III/IV or any metastasis.\n"
+                "- **P = 1** for deceased status, or stage IV with brain/multiple metastases.\n"
+                "- **U = 0** with no previous treatment; otherwise 1 for deceased/stage IV, "
+                "2 for stage III, and 3 for stage I/II.\n"
+                "- **B = 1** for multiple metastases, or 3+ previous treatments with metastasis.\n\n"
+                "These are simplified project mapping rules. Cancer type is collected as context "
+                "but does not independently change D, P, U, or B in this mapping."
+            )
 
 # ---------------------------------------------------------
 # PAGE: TRANSITION MATRICES
@@ -678,7 +888,7 @@ elif page == "State Explorer":
         c1, c2, c3, c4 = st.columns(4)
         d = c1.selectbox("D", [0, 1])
         p = c2.selectbox("P", [0, 1])
-        u = c3.selectbox("U", [0, 1])
+        u = c3.selectbox("U", [0, 1, 2, 3])
         b = c4.selectbox("B", [0, 1])
         state_id = int(d * 16 + p * 8 + u * 2 + b)
 
