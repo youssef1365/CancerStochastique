@@ -1,15 +1,28 @@
 
+import sys
+from pathlib import Path
 from collections import Counter
 
 import numpy as np
 import pandas as pd
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from config import ACTIONS
 from markov_states import decode_state
-from agents.diagnostic_agent import DiagnosticAgent
-from agents.prognostic_agent import PrognosticAgent
-from agents.treatment_agent import TreatmentAgent
-from agents.biological_agent import BiologicalAgent
+
+try:
+    from agents.diagnostic_agent import DiagnosticAgent
+    from agents.prognostic_agent import PrognosticAgent
+    from agents.treatment_agent import TreatmentAgent
+    from agents.biological_agent import BiologicalAgent
+except ImportError:
+    from diagnostic_agent import DiagnosticAgent
+    from prognostic_agent import PrognosticAgent
+    from treatment_agent import TreatmentAgent
+    from biological_agent import BiologicalAgent
 
 
 class MultiAgentSystem:
@@ -158,13 +171,15 @@ class MultiAgentSystem:
             replace=False,
         )
 
+        # Fast lookup: filter dataframe for sampled IDs only
+        sample_df = df[df["patient_id"].isin(sample_ids)].sort_values(["patient_id", "timestep"])
+        patient_first_rows = sample_df.groupby("patient_id", as_index=False).first()
+
         results = []
 
-        for pid in sample_ids:
-            rows = df[df["patient_id"] == pid].sort_values("timestep")
-            first_row = rows.iloc[0]
-
-            state_idx = int(first_row["state_from"])
+        for row in patient_first_rows.itertuples(index=False):
+            pid = row.patient_id
+            state_idx = int(row.state_from)
             D, P, U, B = map(int, decode_state(state_idx))
 
             patient_data = {
@@ -179,7 +194,7 @@ class MultiAgentSystem:
 
             decision = self.decide(patient_data, verbose=verbose)
 
-            original_action = int(first_row["action"])
+            original_action = int(row.action)
 
             results.append({
                 "patient_id": pid,

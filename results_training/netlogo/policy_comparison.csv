@@ -1,6 +1,5 @@
 policy,ticks,total_patients,terminal_patients,terminal_percent,active_patients,active_percent,average_final_state
 Q-Learning,100,10,7,70,3,30,18
 Double Q-learning,100,10,9,90,1,10,16.3
-policy,ticks,total_patients,terminal_patients,terminal_percent,active_patients,active_percent,average_final_state
 Q-Learning,100,10,6,60,4,40,14.7
 Double Q-learning,100,10,9,90,1,10,10

@@ -1,2 +1,11 @@
 /.venv
+/venv
 .idea
+.vscode
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,6 +1,18 @@
+import sys
+from pathlib import Path
+
+# Ensure root directory is on sys.path if invoked from within agents/
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+try:
+    from agents.base_agent import BaseAgent
+except ImportError:
+    from base_agent import BaseAgent
+
 from config import D_LABELS
 from markov_states import fd
-from base_agent import BaseAgent
 
 
 class DiagnosticAgent(BaseAgent):

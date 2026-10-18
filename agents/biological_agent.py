@@ -1,6 +1,17 @@
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+try:
+    from agents.base_agent import BaseAgent
+except ImportError:
+    from base_agent import BaseAgent
+
 from config import B_LABELS
-from markov_states import (fb)
-from base_agent import BaseAgent
+from markov_states import fb
 
 
 class BiologicalAgent(BaseAgent):

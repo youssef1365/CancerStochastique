@@ -60,7 +60,7 @@ end
 
 to create-patients
   let valid-states filter [
-    s -> s != 6 and s != 27 and
+    s -> s != 6 and s != 25 and
     not empty? (supported-actions-for s)
   ] (range 32)
 
@@ -183,7 +183,7 @@ to go
       set state-id next-state
       decode-current-state
 
-      if member? state-id [6 27] [
+      if member? state-id [6 25] [
         set patient-alive? false
       ]
     ]
@@ -226,7 +226,7 @@ to display-policy [policy policy-name]
 
   foreach (range 32) [
     s ->
-    if s != 6 and s != 27 [
+    if s != 6 and s != 25 [
       let matching-rows filter [
         row -> item 0 row = s
       ] policy
@@ -512,6 +512,10 @@ to compare-policies
   if empty? initial-patient-states [
     user-message "Run setup before comparing policies."
     stop
+  ]
+
+  if file-exists? "../results_training/netlogo/policy_comparison.csv" [
+    file-delete "../results_training/netlogo/policy_comparison.csv"
   ]
 
   file-open "../results_training/netlogo/policy_comparison.csv"

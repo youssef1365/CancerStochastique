@@ -1,7 +1,11 @@
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 from config import (
     N_STATES, N_ACTIONS, ACTIONS,
@@ -105,52 +109,49 @@ class QLearningAgent:
             self.epsilon * self.epsilon_decay
         )
 
+    def _prepare_trajectories(self, df: pd.DataFrame):
+        """Pre-extract structured patient trajectories for fast training."""
+        trajectories = []
+        for _, group in df.groupby("patient_id", sort=False):
+            sorted_group = group.sort_values("timestep")
+            traj = []
+            n_rows = len(sorted_group)
+            for idx, row in enumerate(sorted_group.itertuples(index=False)):
+                state = int(row.state_from)
+                action = int(row.action)
+                reward = float(row.reward)
+                next_state = int(row.state_to)
+                # True if marked terminal or final recorded transition of the patient
+                done = bool(row.is_terminal) or (idx == n_rows - 1)
+                traj.append((state, action, reward, next_state, done))
+            if traj:
+                trajectories.append(traj)
+        return trajectories
+
     def train_from_dataset(
-        self, df: pd.DataFrame, n_episodes: int = N_EPISODES
+        self, df: pd.DataFrame, n_episodes: int = N_EPISODES, trajectories=None
     ):
-        print(f"\n{'=' * 70}")
-        print("TRAINING Q-LEARNING AGENT")
-        print(f"{'=' * 70}")
+        if not self.valid_actions.any():
+            self.build_valid_actions(df)
 
-        self.build_valid_actions(df)
+        if trajectories is None:
+            if not hasattr(self, "_cached_trajectories") or self._cached_trajectories is None:
+                self._cached_trajectories = self._prepare_trajectories(df)
+            trajectories = self._cached_trajectories
 
-        print(f"States: {self.n_states}")
-        print(f"Actions: {self.n_actions}")
-        print(
-            f"alpha={self.alpha}, gamma={self.gamma}, "
-            f"epsilon_start={self.epsilon}"
-        )
-        print(f"Episodes: {n_episodes:,}\n")
+        if not trajectories:
+            raise ValueError("Training dataset contains no valid patient trajectories.")
 
-        patient_groups = df.groupby("patient_id")
-        patient_ids = list(patient_groups.groups.keys())
-
-        if not patient_ids:
-            raise ValueError("Training dataset contains no patients.")
-
-        for _ in tqdm(range(n_episodes), desc="Q-Learning Training"):
-            pid = self.rng.choice(patient_ids)
-            trajectory = patient_groups.get_group(pid).sort_values(
-                "timestep"
-            )
-
+        n_traj = len(trajectories)
+        for _ in range(n_episodes):
+            traj = trajectories[self.rng.choice(n_traj)]
             episode_reward = 0.0
             steps = 0
 
-            for _, row in trajectory.iterrows():
-                state = int(row["state_from"])
-                action = int(row["action"])
-                reward = float(row["reward"])
-                next_state = int(row["state_to"])
-                done = bool(row["is_terminal"])
-
-                self.update(
-                    state, action, reward, next_state, done
-                )
-
+            for state, action, reward, next_state, done in traj:
+                self.update(state, action, reward, next_state, done)
                 episode_reward += reward
                 steps += 1
-
                 if done:
                     break
 
@@ -158,11 +159,6 @@ class QLearningAgent:
             self.episode_lengths.append(steps)
             self.q_value_history.append(float(np.mean(self.Q)))
             self.decay_epsilon()
-
-        print("\nTraining complete.")
-        print(f"Final epsilon: {self.epsilon:.4f}")
-        print(f"Mean Q-value: {np.mean(self.Q):.4f}")
-        print(f"Max Q-value: {np.max(self.Q):.4f}")
 
     def get_policy(self) -> np.ndarray:
         policy = np.full(self.n_states, -1, dtype=int)

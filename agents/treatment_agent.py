@@ -1,9 +1,19 @@
 
+import sys
+from pathlib import Path
 import numpy as np
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+try:
+    from agents.base_agent import BaseAgent
+except ImportError:
+    from base_agent import BaseAgent
 
 from config import N_ACTIONS, ACTIONS
 from markov_states import encode_state, decode_state
-from base_agent import BaseAgent
 
 
 class TreatmentAgent(BaseAgent):

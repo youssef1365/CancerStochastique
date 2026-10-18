@@ -97,7 +97,7 @@ def fu(treatments_so_far: list, outcome: str, stage: str) -> int:
     stage_idx = STAGES.index(stage)
 
     if outcome == "Deceased":
-        return 1  # Low — treatment didn't save
+        return 0  # None — treatment failure (maps deceased patients to terminal state S25)
 
     if stage_idx >= 3:
         return 1  # Low — late stage
