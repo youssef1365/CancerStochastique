@@ -26,19 +26,31 @@ class PrognosticAgent(BaseAgent):
         super().__init__("PrognosticAgent")
 
     def evaluate(self) -> dict:
-        cancer_type = self.observations.get('cancer_type', 'Lung')
-        stage = self.observations.get('stage', 'I')
-        outcome = self.observations.get('outcome', 'Alive')
-        met_site = self.observations.get('metastatic_site', 'None')
+        has_clinical = "outcome" in self.observations or "stage" in self.observations or "metastatic_site" in self.observations
+        if "P" in self.observations:
+            P = int(self.observations["P"])
+        else:
+            cancer_type = self.observations.get('cancer_type', 'Lung')
+            stage = self.observations.get('stage', 'I')
+            outcome = self.observations.get('outcome', 'Alive')
+            met_site = self.observations.get('metastatic_site', 'None')
+            P = fp(cancer_type, stage, outcome, met_site)
 
-        P = fp(cancer_type, stage, outcome, met_site)
+        if has_clinical:
+            outcome = self.observations.get('outcome', 'Alive')
+            stage = self.observations.get('stage', 'I')
+            assessment = (
+                f"Prognosis: {P_LABELS[P]} "
+                f"(Outcome: {outcome}, Stage {stage})"
+            )
+        else:
+            assessment = f"Prognosis: {P_LABELS[P]} (Encoded state P={P})"
 
         return {
             'P': P,
             'prognosis': P_LABELS[P],
             'confidence': 0.85,
-            'assessment': f"Prognosis: {P_LABELS[P]} "
-                          f"(Outcome: {outcome}, Stage {stage})"
+            'assessment': assessment
         }
 
     def vote(self, proposed_action: int, state: tuple) -> int:

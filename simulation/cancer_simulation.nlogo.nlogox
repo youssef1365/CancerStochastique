@@ -395,7 +395,11 @@ to update-visualization
     ifelse patient-alive? [
       set color scale-color blue state-id 31 0
     ] [
-      set color gray
+      ifelse state-id = 6 [
+        set color green
+      ] [
+        set color gray
+      ]
     ]
   ]
 end

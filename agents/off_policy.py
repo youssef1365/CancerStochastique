@@ -213,14 +213,17 @@ def evaluate_policy_model(R, P, pi, gamma: float, max_iter: int = 5000, tol=1e-1
 # Estimators
 # ----------------------------------------------------------------------------
 
-def _estimates(cum, disc_r, dr_term):
+def _estimates(cum, disc_r, dr_term, mask=None):
     """All point estimates from cumulative ratios and discounted rewards."""
     w = cum[:, -1]
     G = disc_r.sum(axis=1)
     w_sum = w.sum()
 
     num_t = (cum * disc_r).sum(axis=0)
-    den_t = cum.sum(axis=0)
+    if mask is not None:
+        den_t = (cum * mask).sum(axis=0)
+    else:
+        den_t = cum.sum(axis=0)
     per_step = np.divide(num_t, den_t, out=np.zeros_like(num_t), where=den_t > 0)
 
     return {
@@ -299,7 +302,7 @@ def evaluate_target(
     dr_term = corrections
     dr_term[:, 0] += V_hat[s[:, 0]]
 
-    point = _estimates(cum, disc_r, dr_term)
+    point = _estimates(cum, disc_r, dr_term, mask)
 
     rng = np.random.default_rng(seed)
     boots = {k: np.full(n_bootstrap, np.nan) for k in point}
@@ -310,6 +313,7 @@ def evaluate_target(
             cum[idx],
             disc_r[idx],
             dr_term[idx],
+            mask[idx],
         )
         for k, value in estimates.items():
             boots[k][b] = value

@@ -162,13 +162,18 @@ class DoubleQLearningAgent:
         )
 
     def train_from_dataset(self, df, n_episodes=N_EPISODES, trajectories=None):
-        data = self._prepare_dataset(df)
-        self._build_valid_actions(data)
+        if trajectories is not None:
+            groups = trajectories
+        else:
+            if not hasattr(self, "_cached_trajectories") or self._cached_trajectories is None:
+                data = self._prepare_dataset(df)
+                self._build_valid_actions(data)
+                self._cached_trajectories = [
+                    group.sort_values("timestep")
+                    for _, group in data.groupby("patient_id", sort=False)
+                ]
+            groups = self._cached_trajectories
 
-        groups = [
-            group.sort_values("timestep")
-            for _, group in data.groupby("patient_id", sort=False)
-        ]
         if not groups:
             raise ValueError("No patient trajectories found.")
         if n_episodes < 1:

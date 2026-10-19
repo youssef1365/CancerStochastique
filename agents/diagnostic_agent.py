@@ -27,18 +27,32 @@ class DiagnosticAgent(BaseAgent):
         super().__init__("DiagnosticAgent")
 
     def evaluate(self) -> dict:
-        stage = self.observations.get('stage', 'I')
-        met_site = self.observations.get('metastatic_site', 'None')
-        cancer_type = self.observations.get('cancer_type', 'Lung')
+        has_clinical = "stage" in self.observations or "metastatic_site" in self.observations
+        if "D" in self.observations:
+            D = int(self.observations["D"])
+        else:
+            stage = self.observations.get('stage', 'I')
+            met_site = self.observations.get('metastatic_site', 'None')
+            cancer_type = self.observations.get('cancer_type', 'Lung')
+            D = fd(cancer_type, stage, met_site)
 
-        D = fd(cancer_type, stage, met_site)
+        if has_clinical:
+            stage = self.observations.get('stage', 'I')
+            met_site = self.observations.get('metastatic_site', 'None')
+            confidence = 0.9 if D == 1 and met_site != "None" else 0.75
+            assessment = (
+                f"Disease severity: {D_LABELS[D]} "
+                f"(Stage {stage}, Met: {met_site})"
+            )
+        else:
+            confidence = 0.85
+            assessment = f"Disease severity: {D_LABELS[D]} (Encoded state D={D})"
 
         return {
             'D': D,
             'severity': D_LABELS[D],
-            'confidence': 0.9 if D == 1 and met_site != "None" else 0.75,
-            'assessment': f"Disease severity: {D_LABELS[D]} "
-                          f"(Stage {stage}, Met: {met_site})"
+            'confidence': confidence,
+            'assessment': assessment
         }
 
     def vote(self, proposed_action: int, state: tuple) -> int:

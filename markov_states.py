@@ -87,9 +87,22 @@ def fp(cancer_type: str, stage: str, outcome: str, metastatic_site: str) -> int:
     return 0  # Good
 
 
-def fu(treatments_so_far: list, outcome: str, stage: str) -> int:
+def _count_treatments(treatments_so_far) -> int:
+    if treatments_so_far is None:
+        return 0
+    if isinstance(treatments_so_far, (int, float, np.integer)):
+        return max(0, int(treatments_so_far))
+    if isinstance(treatments_so_far, (list, tuple, set)):
+        return len(treatments_so_far)
+    try:
+        return int(treatments_so_far)
+    except (ValueError, TypeError):
+        return 0
 
-    n_treatments = len(treatments_so_far)
+
+def fu(treatments_so_far, outcome: str, stage: str) -> int:
+
+    n_treatments = _count_treatments(treatments_so_far)
 
     if n_treatments == 0:
         return 0  # No treatment yet
@@ -107,12 +120,13 @@ def fu(treatments_so_far: list, outcome: str, stage: str) -> int:
         return 3  # High — early stage, alive
 
 
-def fb(cancer_type: str, treatments_so_far: list, metastatic_site: str) -> int:
+def fb(cancer_type: str, treatments_so_far, metastatic_site: str) -> int:
 
     if metastatic_site == "Multiple":
         return 1  # Resistant
 
-    if len(treatments_so_far) >= 3 and metastatic_site != "None":
+    n_treatments = _count_treatments(treatments_so_far)
+    if n_treatments >= 3 and metastatic_site != "None":
         return 1  # Resistant
 
     return 0  # Responsive

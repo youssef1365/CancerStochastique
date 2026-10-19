@@ -4,7 +4,7 @@ import pandas as pd
 from collections import Counter
 
 from config import N_STATES, N_ACTIONS, ACTIONS
-from markov_states import encode_state, decode_state
+from markov_states import encode_state, decode_state, fu
 from agents.diagnostic_agent import DiagnosticAgent
 from agents.prognostic_agent import PrognosticAgent
 from agents.treatment_agent import TreatmentAgent
@@ -142,7 +142,17 @@ class MultiAgentSystem:
             D = int(diagnostic_result["D"])
             P = int(prognostic_result["P"])
             B = int(biological_result["B"])
-            U = int(patient_data.get("U", 0))
+
+            if "U" in patient_data:
+                U = int(patient_data["U"])
+            else:
+                treatments = patient_data.get(
+                    "treatments",
+                    patient_data.get("previous_treatments", [])
+                )
+                outcome = patient_data.get("outcome", "Alive")
+                stage = patient_data.get("stage", "I")
+                U = fu(treatments, outcome, stage)
 
             state_tuple = (D, P, U, B)
             state_idx = encode_state(*state_tuple)
@@ -192,39 +202,59 @@ class MultiAgentSystem:
         votes = {}
         for agent in self.agents:
             vote = agent.vote(proposed_action, state_tuple)
+            votes[agent.name] = int(vote)
 
-            # Keep every agent's vote within the actions supported
-            # by the training data for this state.
-            if (
-                    self.valid_actions is not None
-                    and self.valid_actions[state_idx].any()
-                    and (
-                    not self._valid_action(vote)
-                    or not self.valid_actions[state_idx, int(vote)]
+        # Check for clinical specialist vetoes (safety guardrails)
+        # Priority order: Prognostic (palliative) > Biological (immuno) > Diagnostic (over/undertreatment)
+        vetoed = False
+        veto_reason = None
+        vetoing_agents = []
+        override_action = None
+
+        prog_vote = votes["PrognosticAgent"]
+        bio_vote = votes["BiologicalAgent"]
+        diag_vote = votes["DiagnosticAgent"]
+
+        if prog_vote != proposed_action:
+            vetoed = True
+            vetoing_agents.append("PrognosticAgent")
+            override_action = prog_vote
+            veto_reason = "Prognostic safety override: Palliative care recommended for high-burden resistant disease"
+        elif bio_vote != proposed_action:
+            vetoed = True
+            vetoing_agents.append("BiologicalAgent")
+            override_action = bio_vote
+            veto_reason = "Biological safety override: Chemotherapy redirected to Immunotherapy due to tumor resistance"
+        elif diag_vote != proposed_action:
+            vetoed = True
+            vetoing_agents.append("DiagnosticAgent")
+            override_action = diag_vote
+            veto_reason = (
+                "Diagnostic safety override: Overtreatment combination vetoed in low-severity state"
+                if state_tuple[0] == 0
+                else "Diagnostic safety override: Passive observation vetoed in high-severity state"
             )
-            ):
-                vote = proposed_action
 
-            vote = self._select_valid_action(vote, state_idx)
-            votes[agent.name] = vote
+        if override_action is not None:
+            # If an action mask is enforced, ensure override is supported;
+            # if not directly supported, pick the best valid action avoiding the vetoed proposed action
+            if self.valid_actions is not None and self.valid_actions[state_idx].any():
+                if self.valid_actions[state_idx, override_action]:
+                    final_action = override_action
+                else:
+                    valid_acts = np.flatnonzero(self.valid_actions[state_idx])
+                    non_proposed = [a for a in valid_acts if a != proposed_action]
+                    if non_proposed:
+                        q_vals = treatment_result["q_values"]
+                        final_action = int(max(non_proposed, key=lambda a: q_vals[a]))
+                    else:
+                        final_action = proposed_action
+            else:
+                final_action = override_action
+        else:
+            final_action = proposed_action
 
         counts = Counter(votes.values())
-        highest_vote_count = max(counts.values())
-        tied_actions = {
-            action for action, count in counts.items()
-            if count == highest_vote_count
-        }
-
-        if proposed_action in tied_actions:
-            final_action = proposed_action
-        else:
-            final_action = min(
-                tied_actions,
-                key=lambda action: (
-                    -float(treatment_result["q_values"][action]),
-                    action
-                )
-            )
 
         result = {
             "state_index": state_idx,
@@ -237,8 +267,12 @@ class MultiAgentSystem:
             "proposed_action": proposed_action,
             "proposed_action_name": ACTIONS[proposed_action],
             "final_action": final_action,
+            "final_action_name": ACTIONS[final_action],
             "recommended_action": final_action,
             "action_name": ACTIONS[final_action],
+            "vetoed": vetoed,
+            "veto_reason": veto_reason,
+            "vetoing_agents": vetoing_agents,
             "q_values": np.asarray(
                 treatment_result["q_values"], dtype=float
             ).copy(),
@@ -353,7 +387,51 @@ class MultiAgentSystem:
                 "consensus": decision["consensus"],
                 "q_proposed_matches_final": (
                     proposed_action == final_action
-                )
+                ),
+                "vetoed": decision.get("vetoed", False),
             })
 
         return pd.DataFrame(results)
+
+    @classmethod
+    def from_models(cls, model_dir=None, algorithm="double_q_learning"):
+        """Factory method to load a MultiAgentSystem with saved models."""
+        from pathlib import Path
+        if model_dir is None:
+            model_dir = Path(__file__).resolve().parent.parent / "results_training" / "models"
+        else:
+            model_dir = Path(model_dir)
+
+        valid_actions = None
+        va_path = model_dir / "valid_actions.npy"
+        if va_path.exists():
+            try:
+                valid_actions = np.load(va_path)
+            except Exception:
+                valid_actions = None
+
+        if algorithm == "double_q_learning":
+            from q_learnings.double_q_learning import DoubleQLearningAgent
+            agent = DoubleQLearningAgent()
+            qa_path = model_dir / "q_table_QA.npy"
+            qb_path = model_dir / "q_table_QB.npy"
+            dq_path = model_dir / "double_q_learning_q_table.npy"
+            if qa_path.exists() and qb_path.exists():
+                agent.QA = np.load(qa_path)
+                agent.QB = np.load(qb_path)
+            elif dq_path.exists():
+                combined = np.load(dq_path)
+                agent.QA = combined.copy()
+                agent.QB = combined.copy()
+            if valid_actions is not None:
+                agent.valid_actions = valid_actions.copy()
+            return cls(double_q_agent=agent, use_double=True, valid_actions=valid_actions)
+        else:
+            from q_learnings.q_learning import QLearningAgent
+            agent = QLearningAgent()
+            q_path = model_dir / "q_learning_q_table.npy"
+            if q_path.exists():
+                agent.Q = np.load(q_path)
+            if valid_actions is not None:
+                agent.valid_actions = valid_actions.copy()
+            return cls(q_agent=agent, use_double=False, valid_actions=valid_actions)

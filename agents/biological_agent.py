@@ -26,18 +26,41 @@ class BiologicalAgent(BaseAgent):
         super().__init__("BiologicalAgent")
 
     def evaluate(self) -> dict:
-        cancer_type = self.observations.get('cancer_type', 'Lung')
-        treatments = self.observations.get('treatments', [])
-        met_site = self.observations.get('metastatic_site', 'None')
+        has_clinical = (
+            "treatments" in self.observations
+            or "previous_treatments" in self.observations
+            or "metastatic_site" in self.observations
+        )
+        if "B" in self.observations:
+            B = int(self.observations["B"])
+        else:
+            cancer_type = self.observations.get('cancer_type', 'Lung')
+            treatments = self.observations.get(
+                'treatments',
+                self.observations.get('previous_treatments', [])
+            )
+            met_site = self.observations.get('metastatic_site', 'None')
+            B = fb(cancer_type, treatments, met_site)
 
-        B = fb(cancer_type, treatments, met_site)
+        if has_clinical:
+            treatments = self.observations.get(
+                'treatments',
+                self.observations.get('previous_treatments', [])
+            )
+            n_tx = len(treatments) if isinstance(treatments, (list, tuple)) else int(treatments or 0)
+            met_site = self.observations.get('metastatic_site', 'None')
+            assessment = (
+                f"Biological response: {B_LABELS[B]} "
+                f"(Treatments: {n_tx}, Met: {met_site})"
+            )
+        else:
+            assessment = f"Biological response: {B_LABELS[B]} (Encoded state B={B})"
 
         return {
             'B': B,
             'response': B_LABELS[B],
             'confidence': 0.80,
-            'assessment': f"Biological response: {B_LABELS[B]} "
-                          f"(Treatments: {len(treatments)}, Met: {met_site})"
+            'assessment': assessment
         }
 
     def vote(self, proposed_action: int, state: tuple) -> int:

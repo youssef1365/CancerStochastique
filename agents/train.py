@@ -25,12 +25,20 @@ from markov_states import decode_state
 from q_learnings.q_learning import QLearningAgent
 from q_learnings.double_q_learning import DoubleQLearningAgent
 from agents.multi_agent import MultiAgentSystem
-from off_policy import (
-    split_by_patient,
-    state_action_counts,
-    greedy_policy,
-    run_ope,
-)
+try:
+    from agents.off_policy import (
+        split_by_patient,
+        state_action_counts,
+        greedy_policy,
+        run_ope,
+    )
+except ImportError:
+    from off_policy import (
+        split_by_patient,
+        state_action_counts,
+        greedy_policy,
+        run_ope,
+    )
 
 
 REQUIRED_COLUMNS = [

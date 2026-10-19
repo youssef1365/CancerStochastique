@@ -145,9 +145,15 @@ def generate_trajectory(pid, rng, data_source):
     while t < cfg.MAX_TIMESTEPS:
         a = int(rng.choice(cfg.N_ACTIONS, p=BEHAVIOUR_POLICY[p["stage"]]))
         p_new, died = _advance(p, a, rng)
-        s_to = _state_of(p_new)
-        term = bool(is_terminal(s_to))
-        reward = float(compute_reward(s_from, a, s_to))
+        if died:
+            s_to = 25  # Absorbing terminal death state: D=1, P=1, U=0, B=1
+            term = True
+            reward = float(cfg.REWARD_DEATH)
+        else:
+            s_to = _state_of(p_new)
+            term = bool(is_terminal(s_to))
+            reward = float(compute_reward(s_from, a, s_to))
+
         d_end = d + timedelta(days=int(rng.integers(INTERVAL_DAYS[0],
                                                     INTERVAL_DAYS[1] + 1)))
         rows.append({
@@ -159,11 +165,8 @@ def generate_trajectory(pid, rng, data_source):
         })
         p, s_from, d, t = p_new, s_to, d_end, t + 1
 
-        if term:
+        if term or died:
             end_reason = END_TERMINAL
-            break
-        if died:
-            end_reason = END_DEATH
             break
         if t >= cfg.MAX_TIMESTEPS:
             end_reason = END_MAXT

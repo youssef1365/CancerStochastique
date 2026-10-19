@@ -120,6 +120,7 @@ def find_column(df, names):
     return None
 
 
+@st.cache_data(show_spinner=False)
 def load_policy(filename, label):
     path = locate_file(filename)
 
@@ -198,11 +199,15 @@ def load_policy(filename, label):
     return policy, str(path)
 
 
-@st.cache_data(show_spinner=False)
-def load_policy_cached(path_string, filename, label):
-    # Cache policy loading by file path and filename.
-    df = pd.read_csv(path_string)
-    return df
+@st.cache_resource(show_spinner=False)
+def load_multi_agent_system(algorithm="double_q_learning"):
+    try:
+        from agents.multi_agent import MultiAgentSystem
+        model_folder = locate_file("valid_actions.npy")
+        model_dir = model_folder.parent if model_folder else None
+        return MultiAgentSystem.from_models(model_dir=model_dir, algorithm=algorithm)
+    except Exception:
+        return None
 
 
 def get_action(policy, state_id):
@@ -563,6 +568,75 @@ if page == "Patient Assessment":
                 a, b = st.columns(2)
                 a.metric("Q-Learning", ACTIONS[q_action])
                 b.metric("Double Q-Learning", ACTIONS[dq_action])
+
+        # Terminal state clinical notifications
+        if case["state_id"] == 25:
+            st.error(
+                "⚠️ **Absorbing Terminal State S25 (Terminal Death):** "
+                "Patient condition represents maximum disease severity, poor prognosis, and biological resistance. "
+                "The disease trajectory has reached terminus; active disease-modifying therapies cannot be administered."
+            )
+        elif case["state_id"] == 6:
+            st.info(
+                "🌟 **Absorbing Terminal State S06 (Full Curative Remission):** "
+                "Patient has achieved complete curative recovery with high utility and responsive tumor biology."
+            )
+
+        # Multi-Agent Tumor Board Consensus
+        st.markdown("### 🤖 Multi-Agent Tumor Board Consensus")
+        algo_choice = "q_learning" if case["model_choice"] == "Q-Learning" else "double_q_learning"
+        mas = load_multi_agent_system(algorithm=algo_choice)
+
+        if mas is not None:
+            mas_decision = mas.decide({
+                "cancer_type": case["cancer_type"],
+                "stage": case["stage"],
+                "outcome": case["status"],
+                "metastatic_site": case["metastatic_site"],
+                "previous_treatments": case["previous_treatments"],
+                "state_tuple": (encoded["D"], encoded["P"], encoded["U"], encoded["B"]),
+                "state_index": case["state_id"],
+            })
+
+            if mas_decision.get("vetoed"):
+                st.warning(
+                    f"🚨 **Clinical Specialist Guardrail Override:** {mas_decision.get('veto_reason')}\n\n"
+                    f"The reinforcement learning agent proposed **{mas_decision['proposed_action_name']}**, "
+                    f"but the Tumor Board clinical specialist overruled it in favor of **{mas_decision['final_action_name']}**."
+                )
+            else:
+                st.success(
+                    f"✅ **Tumor Board Consensus ({mas_decision['consensus']:.0%}):** "
+                    f"The clinical Tumor Board confirmed **{mas_decision['final_action_name']}**."
+                )
+
+            assessments = mas_decision.get("assessments", {})
+            votes = mas_decision.get("votes", {})
+            b_c1, b_c2, b_c3, b_c4 = st.columns(4)
+
+            with b_c1:
+                st.markdown("**Diagnostic Agent**")
+                diag_eval = assessments.get("diagnostic", {})
+                st.metric("Voted Action", ACTIONS.get(votes.get("DiagnosticAgent", 0), "None"))
+                st.caption(diag_eval.get("assessment", ""))
+
+            with b_c2:
+                st.markdown("**Prognostic Agent**")
+                prog_eval = assessments.get("prognostic", {})
+                st.metric("Voted Action", ACTIONS.get(votes.get("PrognosticAgent", 0), "None"))
+                st.caption(prog_eval.get("assessment", ""))
+
+            with b_c3:
+                st.markdown("**Biological Agent**")
+                bio_eval = assessments.get("biological", {})
+                st.metric("Voted Action", ACTIONS.get(votes.get("BiologicalAgent", 0), "None"))
+                st.caption(bio_eval.get("assessment", ""))
+
+            with b_c4:
+                st.markdown("**Treatment Agent (RL)**")
+                treat_eval = assessments.get("TreatmentAgent", {})
+                st.metric("Proposed Action", mas_decision["proposed_action_name"])
+                st.caption(f"Evaluated via {mas_decision.get('agent_type', 'RL')}")
 
         with st.expander("Case data"):
             st.json({
@@ -1046,16 +1120,17 @@ elif page == "Model Index & Theory":
         * **Calculated Total Reward $R(s, a, s')$: ** **`{computed_r:+.1f}`**
         """)
 
+        cost_str = " - 1.0" if calc_act > 0 else " + 0.0"
         if calc_to == 6:
             st.success("🌟 Awarded Full Recovery Bonus (+30.0).")
         elif calc_to == 25:
             st.error("⚠️ Penalized with Absorbing Death Penalty (-50.0).")
         elif delta_q > 0:
-            st.info(f"📈 Patient improved by {delta_q:+.1f} points: reward = +10.0 × ({delta_q:.1f}) {cost_penalty:.1f} = {computed_r:.1f}.")
+            st.info(f"📈 Patient improved by {delta_q:+.1f} points: reward = (+10.0 × {delta_q:.1f}){cost_str} = {computed_r:.1f}.")
         elif delta_q == 0:
-            st.info(f"⚖️ Disease stabilized: reward = +1.0 {cost_penalty:.1f} = {computed_r:.1f}.")
+            st.info(f"⚖️ Disease stabilized: reward = (+1.0){cost_str} = {computed_r:.1f}.")
         else:
-            st.warning(f"📉 Disease deteriorated by {delta_q:.1f} points: reward = -5.0 × ({abs(delta_q):.1f}) {cost_penalty:.1f} = {computed_r:.1f}.")
+            st.warning(f"📉 Disease deteriorated by {delta_q:.1f} points: reward = (-5.0 × {abs(delta_q):.1f}){cost_str} = {computed_r:.1f}.")
 
         st.divider()
         st.subheader("4. Connection to the Bellman Equation")

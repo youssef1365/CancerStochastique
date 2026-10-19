@@ -10,7 +10,7 @@
     "n_test_patients": 5000
   },
   "training": {
-    "seconds": 160.14715250011068,
+    "seconds": 3.565282959997603,
     "final_epsilon": 0.01,
     "mean_Q": 18.01751677147213,
     "max_Q": 46.46276464799212,
@@ -65,9 +65,9 @@
       {
         "policy": "learned",
         "estimator": "PDWIS",
-        "estimate": 4.534835652055168,
-        "ci_low": -5.079207683221774,
-        "ci_high": 13.34330147611005,
+        "estimate": 18.769837503212102,
+        "ci_low": -11.507697091909506,
+        "ci_high": 43.795579029102655,
         "ess": 10.45161232955245,
         "max_weight_share": 0.2361797690241148,
         "n_patients": 5000
@@ -75,9 +75,9 @@
       {
         "policy": "learned",
         "estimator": "DR",
-        "estimate": 25.205015753217328,
-        "ci_low": 18.967712055624546,
-        "ci_high": 29.370835574343783,
+        "estimate": 25.20501575321732,
+        "ci_low": 18.96771205562454,
+        "ci_high": 29.37083557434378,
         "ess": 10.45161232955245,
         "max_weight_share": 0.2361797690241148,
         "n_patients": 5000
@@ -105,9 +105,9 @@
       {
         "policy": "learned",
         "estimator": "PDWIS_minus_logged",
-        "estimate": -11.454550828157666,
-        "ci_low": -20.998623977050553,
-        "ci_high": -2.5225233936538864,
+        "estimate": 2.7804510229992676,
+        "ci_low": -27.005831360760173,
+        "ci_high": 28.003659533390543,
         "ess": 10.45161232955245,
         "max_weight_share": 0.2361797690241148,
         "n_patients": 5000
@@ -115,9 +115,9 @@
       {
         "policy": "learned",
         "estimator": "DR_minus_logged",
-        "estimate": 9.215629273004494,
-        "ci_low": 2.749617741582914,
-        "ci_high": 13.349512351094829,
+        "estimate": 9.215629273004486,
+        "ci_low": 2.7496177415829086,
+        "ci_high": 13.349512351094821,
         "ess": 10.45161232955245,
         "max_weight_share": 0.2361797690241148,
         "n_patients": 5000
@@ -145,9 +145,9 @@
       {
         "policy": "behavior_clone",
         "estimator": "PDWIS",
-        "estimate": 15.989386480212838,
-        "ci_low": 15.319455038484609,
-        "ci_high": 16.67161121068665,
+        "estimate": 25.705779084252658,
+        "ci_low": 24.48135638474034,
+        "ci_high": 27.036189704410248,
         "ess": 5000.0,
         "max_weight_share": 0.0002,
         "n_patients": 5000
@@ -185,9 +185,9 @@
       {
         "policy": "behavior_clone",
         "estimator": "PDWIS_minus_logged",
-        "estimate": 3.552713678800501e-15,
-        "ci_low": -3.552713678800501e-14,
-        "ci_high": 6.22613072209787e-14,
+        "estimate": 9.716392604039823,
+        "ci_low": 8.858117683514012,
+        "ci_high": 10.620005835632854,
         "ess": 5000.0,
         "max_weight_share": 0.0002,
         "n_patients": 5000
@@ -196,8 +196,8 @@
         "policy": "behavior_clone",
         "estimator": "DR_minus_logged",
         "estimate": 12.03980307518759,
-        "ci_low": 11.787242732933148,
-        "ci_high": 12.272509682079827,
+        "ci_low": 11.787242732933152,
+        "ci_high": 12.27250968207983,
         "ess": 5000.0,
         "max_weight_share": 0.0002,
         "n_patients": 5000
@@ -225,9 +225,9 @@
       {
         "policy": "uniform_random",
         "estimator": "PDWIS",
-        "estimate": 12.992168566981277,
-        "ci_low": 12.390000599552446,
-        "ci_high": 13.659312173258876,
+        "estimate": 27.478169522441263,
+        "ci_low": 25.164767073087226,
+        "ci_high": 29.717786760252327,
         "ess": 1538.219505236643,
         "max_weight_share": 0.001693588527132307,
         "n_patients": 5000
@@ -265,9 +265,9 @@
       {
         "policy": "uniform_random",
         "estimator": "PDWIS_minus_logged",
-        "estimate": -2.997217913231557,
-        "ci_low": -3.408133939919773,
-        "ci_high": -2.5551392614793813,
+        "estimate": 11.488783042228428,
+        "ci_low": 9.297063984012086,
+        "ci_high": 13.582797137797312,
         "ess": 1538.219505236643,
         "max_weight_share": 0.001693588527132307,
         "n_patients": 5000
@@ -277,7 +277,7 @@
         "estimator": "DR_minus_logged",
         "estimate": 11.773506911965343,
         "ci_low": 11.249679835663784,
-        "ci_high": 12.277438529154892,
+        "ci_high": 12.27743852915489,
         "ess": 1538.219505236643,
         "max_weight_share": 0.001693588527132307,
         "n_patients": 5000
@@ -286,8 +286,8 @@
   },
   "mas_evaluation_test_patients": {
     "n_samples": 100,
-    "recorded_action_match_rate": 0.25,
+    "recorded_action_match_rate": 0.23,
     "unanimous_consensus_rate": 0.74,
-    "q_proposal_accepted_rate": 1.0
+    "q_proposal_accepted_rate": 0.74
   }
 }
