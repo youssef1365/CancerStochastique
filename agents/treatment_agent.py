@@ -19,11 +19,18 @@ from markov_states import encode_state, decode_state
 class TreatmentAgent(BaseAgent):
     """Treatment selection using standard or Double Q-learning."""
 
-    def __init__(self, q_agent=None, double_q_agent=None, use_double=False):
+    def __init__(
+            self,
+            q_agent=None,
+            double_q_agent=None,
+            use_double=False,
+            valid_actions=None
+    ):
         super().__init__("TreatmentAgent")
         self.q_agent = q_agent
         self.double_q_agent = double_q_agent
         self.use_double = use_double
+        self.valid_actions = valid_actions
 
     def _get_q_values(self, state_idx):
         if self.use_double:
@@ -63,7 +70,7 @@ class TreatmentAgent(BaseAgent):
         D, P, U, B = decode_state(state_idx)
 
         q_values, agent_type = self._get_q_values(state_idx)
-        best_action = int(np.argmax(q_values))
+        best_action = self._select_action(state_idx, q_values)
 
         return {
             "recommended_action": best_action,
@@ -84,4 +91,21 @@ class TreatmentAgent(BaseAgent):
         if agent_type == "Random":
             return proposed_action
 
-        return int(np.argmax(q_values))
+        return self._select_action(state_idx, q_values)
+
+    def _select_action(self, state_idx, q_values):
+        if self.valid_actions is None:
+            return int(np.argmax(q_values))
+
+        valid = np.asarray(self.valid_actions[state_idx], dtype=bool)
+
+        if valid.shape != (N_ACTIONS,):
+            raise ValueError(
+                f"Invalid action mask for state {state_idx}: {valid.shape}"
+            )
+
+        if not valid.any():
+            return int(np.argmax(q_values))
+
+        masked_q = np.where(valid, q_values, -np.inf)
+        return int(np.argmax(masked_q))

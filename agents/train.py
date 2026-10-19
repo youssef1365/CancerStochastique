@@ -1,23 +1,3 @@
-"""
-Training and Evaluation — Multi-Agent Treatment Decision Support
-
-Architecture:
-    DiagnosticAgent  -> D
-    PrognosticAgent  -> P
-    BiologicalAgent  -> B
-    MultiAgentSystem -> assembles S = (D, P, U, B)
-    TreatmentAgent   -> proposes actions using a trained Q-learning policy
-
-Algorithms:
-    q_learning
-    double_q_learning
-
-Usage:
-    python agents/train.py --data dataset.csv --algorithm q_learning
-    python agents/train.py --data dataset.csv --algorithm double_q_learning
-    python agents/train.py --data dataset.csv --algorithm q_learning --episodes 20000
-"""
-
 import argparse
 import contextlib
 import io
@@ -28,14 +8,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
 try:
     from tqdm import tqdm
 except ImportError:
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -44,6 +25,12 @@ from markov_states import decode_state
 from q_learnings.q_learning import QLearningAgent
 from q_learnings.double_q_learning import DoubleQLearningAgent
 from agents.multi_agent import MultiAgentSystem
+from off_policy import (
+    split_by_patient,
+    state_action_counts,
+    greedy_policy,
+    run_ope,
+)
 
 
 REQUIRED_COLUMNS = [
@@ -56,152 +43,139 @@ REQUIRED_COLUMNS = [
     "is_terminal",
 ]
 
+DEFAULT_GAMMA = 0.95
+
 
 @contextlib.contextmanager
 def quiet():
-    """Suppress internal training output."""
-    with contextlib.redirect_stdout(io.StringIO()), \
-            contextlib.redirect_stderr(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()):
         yield
 
 
-def load_dataset(path: str) -> pd.DataFrame:
+def load_dataset(path):
     df = pd.read_csv(path)
 
-    missing = [
-        column for column in REQUIRED_COLUMNS
-        if column not in df.columns
-    ]
-
+    missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
     if missing:
-        raise ValueError(
-            f"Dataset is missing required columns: {missing}"
-        )
+        raise ValueError(f"Dataset is missing required columns: {missing}")
 
     if df.empty:
         raise ValueError("The dataset is empty.")
 
-    for column in ["state_from", "state_to", "action"]:
+    for column in ("state_from", "state_to", "action", "timestep"):
+        if column not in df.columns:
+            continue
+
         values = pd.to_numeric(df[column], errors="raise")
 
         if not np.isfinite(values).all():
-            raise ValueError(
-                f"{column} contains non-finite values."
-            )
+            raise ValueError(f"{column} contains non-finite values.")
 
-        if not np.all(values == np.floor(values)):
-            raise ValueError(
-                f"{column} must contain integers."
-            )
+        if not np.equal(values, np.floor(values)).all():
+            raise ValueError(f"{column} must contain integers.")
 
         df[column] = values.astype(int)
 
-    if not df["state_from"].between(0, N_STATES - 1).all():
-        raise ValueError("Invalid state_from index in dataset.")
-
-    if not df["state_to"].between(0, N_STATES - 1).all():
-        raise ValueError("Invalid state_to index in dataset.")
+    for column in ("state_from", "state_to"):
+        if not df[column].between(0, N_STATES - 1).all():
+            raise ValueError(f"Invalid {column} index in dataset.")
 
     if not df["action"].between(0, N_ACTIONS - 1).all():
         raise ValueError("Invalid action index in dataset.")
 
-    if not np.isfinite(
-        pd.to_numeric(df["reward"], errors="raise")
-    ).all():
+    df["reward"] = pd.to_numeric(df["reward"], errors="raise")
+    if not np.isfinite(df["reward"]).all():
         raise ValueError("Reward contains non-finite values.")
+
+    terminal = df["is_terminal"]
+
+    if terminal.dtype == bool:
+        df["is_terminal"] = terminal.astype(int)
+    else:
+        terminal = pd.to_numeric(terminal, errors="raise")
+        if not terminal.isin([0, 1]).all():
+            raise ValueError("is_terminal must contain only 0 or 1.")
+        df["is_terminal"] = terminal.astype(int)
+
+    if df["patient_id"].isna().any():
+        raise ValueError("patient_id contains missing values.")
+
+    df = df.sort_values(
+        ["patient_id", "timestep"]
+    ).reset_index(drop=True)
 
     return df
 
 
-def build_transition_matrices(df: pd.DataFrame):
-
+def build_transition_matrices(df):
     counts = np.zeros(
         (N_ACTIONS, N_STATES, N_STATES),
-        dtype=np.int64,
+        dtype=np.int64
     )
 
     actions = df["action"].to_numpy(dtype=int)
     states_from = df["state_from"].to_numpy(dtype=int)
     states_to = df["state_to"].to_numpy(dtype=int)
 
-    np.add.at(
-        counts,
-        (actions, states_from, states_to),
-        1,
-    )
+    np.add.at(counts, (actions, states_from, states_to), 1)
 
     totals = counts.sum(axis=2, keepdims=True)
-
     matrices = np.zeros(
         (N_ACTIONS, N_STATES, N_STATES),
-        dtype=np.float64,
+        dtype=np.float64
     )
 
     np.divide(
         counts,
         totals,
         out=matrices,
-        where=totals > 0,
+        where=totals > 0
     )
 
-    observed_pairs = int(np.count_nonzero(totals[:, :, 0]))
-    total_pairs = N_ACTIONS * N_STATES
-    unobserved_pairs = total_pairs - observed_pairs
-
-    # Validate probabilities for observed state-action pairs.
-    row_sums = matrices.sum(axis=2)
     observed_rows = totals[:, :, 0] > 0
+    observed_pairs = int(observed_rows.sum())
+    total_pairs = N_ACTIONS * N_STATES
 
+    row_sums = matrices.sum(axis=2)
     if not np.allclose(row_sums[observed_rows], 1.0):
         raise ValueError(
             "Transition probabilities do not sum to 1 "
-            "for all observed state-action pairs."
+            "for every observed state-action pair."
         )
 
-    if np.any(matrices < 0) or not np.isfinite(matrices).all():
+    if not np.isfinite(matrices).all() or np.any(matrices < 0):
         raise ValueError("Invalid transition probabilities.")
 
-    print("\nTransition matrix summary")
+    print("\nTransition matrix summary (training patients only)")
     print(f"  Matrix shape: {matrices.shape}")
     print(f"  Observed state-action pairs: {observed_pairs}/{total_pairs}")
-    print(f"  Unobserved state-action pairs: {unobserved_pairs}/{total_pairs}")
-    print(f"  Recorded transitions counted: {int(counts.sum()):,}")
+    print(f"  Unobserved state-action pairs: {total_pairs - observed_pairs}")
+    print(f"  Recorded transitions: {int(counts.sum()):,}")
 
     return counts, matrices
 
 
-def export_transition_matrices(
-    counts: np.ndarray,
-    matrices: np.ndarray,
-    model_dir: Path,
-    out: Path,
-):
-
+def export_transition_matrices(counts, matrices, model_dir, out):
     model_dir.mkdir(parents=True, exist_ok=True)
 
     matrix_path = model_dir / "transition_matrices.npz"
-
     np.savez_compressed(
         matrix_path,
         counts=counts,
-        matrices=matrices,
+        matrices=matrices
     )
 
-    # Long-format CSV: one row per action/from-state/to-state.
     action_ids, from_ids, to_ids = np.indices(
         (N_ACTIONS, N_STATES, N_STATES)
     )
-
-    observed_counts = counts.reshape(-1)
-    probabilities = matrices.reshape(-1)
 
     transition_table = pd.DataFrame({
         "action": action_ids.reshape(-1),
         "state_from": from_ids.reshape(-1),
         "state_to": to_ids.reshape(-1),
-        "count": observed_counts,
-        "probability": probabilities,
-        "observed": observed_counts > 0,
+        "count": counts.reshape(-1),
+        "probability": matrices.reshape(-1),
+        "observed": counts.reshape(-1) > 0,
     })
 
     netlogo_dir = out / "netlogo"
@@ -214,128 +188,102 @@ def export_transition_matrices(
     print(f"  Transition CSV: {csv_path.resolve()}")
 
 
-def get_q_table(agent, algorithm: str) -> np.ndarray:
-    """Return the effective action-value table used by the policy."""
+def get_q_table(agent, algorithm):
     if algorithm == "q_learning":
         Q = np.asarray(agent.Q, dtype=float)
     else:
         Q = np.asarray(agent.get_combined_Q(), dtype=float)
 
-    if Q.shape != (N_STATES, N_ACTIONS):
+    expected_shape = (N_STATES, N_ACTIONS)
+
+    if Q.shape != expected_shape:
         raise ValueError(
-            f"Expected Q-table shape {(N_STATES, N_ACTIONS)}, "
-            f"got {Q.shape}."
+            f"Expected Q-table shape {expected_shape}, got {Q.shape}."
         )
 
     if not np.isfinite(Q).all():
-        raise ValueError(
-            "The effective Q-table contains non-finite values."
-        )
+        raise ValueError("The Q-table contains non-finite values.")
 
     return Q
 
 
-def get_policy_table(agent, Q: np.ndarray) -> pd.DataFrame:
-    """Return the policy table, falling back to the effective Q-table."""
-    if hasattr(agent, "get_policy_table"):
-        table = agent.get_policy_table()
-
-        if isinstance(table, pd.DataFrame):
-            return table
-
-    policy = np.argmax(Q, axis=1)
-
-    return pd.DataFrame({
-        "state": np.arange(N_STATES),
-        "best_action": policy,
-        "action_name": [ACTIONS[a] for a in policy],
-        "Q_value": Q[np.arange(N_STATES), policy],
-    })
-
-
-def export_policy_files(
-    agent,
-    Q: np.ndarray,
-    algorithm: str,
-    out: Path,
-):
-    """Export Q-values and greedy policy as CSV files for NetLogo."""
+def export_policy_files(Q, algorithm, out, sa_counts, min_count=1):
     export_dir = out / "netlogo"
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    states = [decode_state(s) for s in range(N_STATES)]
+    states = [decode_state(state) for state in range(N_STATES)]
+    policy, supported = greedy_policy(Q, sa_counts, min_count)
 
-    # Export all state-action values.
+    policy = np.asarray(policy, dtype=int)
+    supported = np.asarray(supported, dtype=bool)
+
+    if policy.shape != (N_STATES,):
+        raise ValueError("The exported policy must contain one action per state.")
+
+    if not np.all((policy >= 0) & (policy < N_ACTIONS)):
+        raise ValueError("The policy contains an invalid action index.")
+
     q_table = pd.DataFrame(
         Q,
-        columns=[f"Q_action_{a}" for a in range(N_ACTIONS)],
+        columns=[f"Q_action_{action}" for action in range(N_ACTIONS)]
     )
     q_table.insert(0, "state", np.arange(N_STATES))
-    q_table["D"] = [s[0] for s in states]
-    q_table["P"] = [s[1] for s in states]
-    q_table["U"] = [s[2] for s in states]
-    q_table["B"] = [s[3] for s in states]
+    q_table["D"] = [state[0] for state in states]
+    q_table["P"] = [state[1] for state in states]
+    q_table["U"] = [state[2] for state in states]
+    q_table["B"] = [state[3] for state in states]
 
-    q_table = q_table[
-        ["state", "D", "P", "U", "B"]
-        + [f"Q_action_{a}" for a in range(N_ACTIONS)]
-    ]
+    q_columns = [f"Q_action_{action}" for action in range(N_ACTIONS)]
+    q_table = q_table[["state", "D", "P", "U", "B"] + q_columns]
 
     q_path = export_dir / f"{algorithm}_Q_values.csv"
     q_table.to_csv(q_path, index=False)
 
-    # Export the greedy action for every state.
-    policy = np.argmax(Q, axis=1)
+    state_visits = sa_counts.sum(axis=1).astype(int)
 
     policy_table = pd.DataFrame({
         "state": np.arange(N_STATES),
-        "D": [s[0] for s in states],
-        "P": [s[1] for s in states],
-        "U": [s[2] for s in states],
-        "B": [s[3] for s in states],
+        "D": [state[0] for state in states],
+        "P": [state[1] for state in states],
+        "U": [state[2] for state in states],
+        "B": [state[3] for state in states],
         "best_action": policy,
-        "action_name": [ACTIONS[a] for a in policy],
+        "action_name": [ACTIONS[action] for action in policy],
         "Q_value": Q[np.arange(N_STATES), policy],
+        "n_visits": state_visits,
+        "supported": supported.astype(int),
     })
 
     policy_path = export_dir / f"{algorithm}_policy.csv"
     policy_table.to_csv(policy_path, index=False)
 
-    # Verify exported policy against the learned Q-table.
     loaded_policy = pd.read_csv(policy_path)
     loaded_q = pd.read_csv(q_path)
 
-    if len(loaded_policy) != N_STATES:
-        raise ValueError("Exported policy has an incorrect row count.")
-
-    if len(loaded_q) != N_STATES:
-        raise ValueError("Exported Q-table has an incorrect row count.")
+    if len(loaded_policy) != N_STATES or len(loaded_q) != N_STATES:
+        raise ValueError("An exported policy or Q-table has an incorrect row count.")
 
     if not np.array_equal(
         loaded_policy["best_action"].to_numpy(dtype=int),
-        np.argmax(Q, axis=1),
+        policy
     ):
-        raise ValueError("Exported policy does not match the Q-table.")
+        raise ValueError("The exported policy does not match the computed policy.")
 
     print(f"\nNetLogo exports: {export_dir.resolve()}")
     print(f"  Q-values: {q_path.name}")
     print(f"  Policy:   {policy_path.name}")
-    print(f"  States:   {N_STATES}")
-    print(f"  Actions:  {N_ACTIONS}")
+    print(f"  Supported states: {int(supported.sum())}/{N_STATES}")
+    print(f"  Actions: {N_ACTIONS}")
+
+    return policy_table
 
 
-def get_history(agent, name: str) -> list:
-    value = getattr(agent, name, [])
-    return list(value) if value is not None else []
+def get_history(agent, name):
+    values = getattr(agent, name, [])
+    return list(values) if values is not None else []
 
 
-def train_agent(
-    df: pd.DataFrame,
-    algorithm: str,
-    n_episodes: int,
-    n_checkpoints: int,
-):
-    """Train the selected algorithm and record checkpoint metrics."""
+def train_agent(df, algorithm, n_episodes, n_checkpoints):
     if algorithm == "q_learning":
         agent = QLearningAgent()
     else:
@@ -346,7 +294,8 @@ def train_agent(
     chunks = [
         len(chunk)
         for chunk in np.array_split(
-            np.arange(n_episodes), n_checkpoints
+            np.arange(n_episodes),
+            n_checkpoints
         )
         if len(chunk) > 0
     ]
@@ -376,11 +325,11 @@ def train_agent(
             "max_Q": float(Q.max()),
             "mean_max_Q": float(Q.max(axis=1).mean()),
             "max_abs_delta_Q": (
-                np.nan if previous_Q is None
+                None if previous_Q is None
                 else float(np.abs(Q - previous_Q).max())
             ),
             "policy_changes": (
-                np.nan if previous_policy is None
+                None if previous_policy is None
                 else int(np.sum(policy != previous_policy))
             ),
         })
@@ -391,13 +340,102 @@ def train_agent(
     return agent, pd.DataFrame(checkpoint_rows), training_seconds
 
 
-def evaluate_logged_actions(Q: np.ndarray, df: pd.DataFrame) -> float:
-    """Measure agreement between the greedy policy and logged actions."""
+def logged_action_agreement(policy, df):
     states = df["state_from"].to_numpy(dtype=int)
     actions = df["action"].to_numpy(dtype=int)
-    predicted = np.argmax(Q, axis=1)[states]
+    return float(np.mean(policy[states] == actions))
 
-    return float(np.mean(predicted == actions))
+
+def clean_for_json(obj):
+    if isinstance(obj, dict):
+        return {key: clean_for_json(value) for key, value in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [clean_for_json(value) for value in obj]
+
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if np.isfinite(obj) else None
+
+    if isinstance(obj, np.integer):
+        return int(obj)
+
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+
+    return obj
+
+
+def ope_report_lines(ope, diagnostics):
+    def fmt(row):
+        return (
+            f"{row.estimate:.3f} "
+            f"[{row.ci_low:.3f}, {row.ci_high:.3f}]"
+        )
+
+    def get(policy_name, estimator):
+        rows = ope[
+            (ope["policy"] == policy_name)
+            & (ope["estimator"] == estimator)
+        ]
+        if rows.empty:
+            raise ValueError(
+                f"Missing OPE result for {policy_name}/{estimator}."
+            )
+        return rows.iloc[0]
+
+    logged = get("logged", "logged")
+
+    lines = [
+        f"Held-out patients: {diagnostics['n_test_patients']} "
+        f"({diagnostics['n_test_transitions']:,} transitions), "
+        f"gamma = {diagnostics['gamma']}, "
+        f"target epsilon = {diagnostics['epsilon']}.",
+        "",
+        "| Policy | WIS | PDWIS | DR | ESS |",
+        "|---|---|---|---|---|",
+        f"| logged | {fmt(logged)} | - | - | - |",
+    ]
+
+    for policy_name in ("learned", "behavior_clone", "uniform_random"):
+        wis = get(policy_name, "WIS")
+        pdwis = get(policy_name, "PDWIS")
+        dr = get(policy_name, "DR")
+
+        lines.append(
+            f"| {policy_name} | {fmt(wis)} | {fmt(pdwis)} | "
+            f"{fmt(dr)} | {wis.ess:.1f} |"
+        )
+
+    lines.extend(["", "Learned minus logged:"])
+
+    for estimator in ("WIS_minus_logged", "DR_minus_logged"):
+        rows = ope[
+            (ope["policy"] == "learned")
+            & (ope["estimator"] == estimator)
+        ]
+        if rows.empty:
+            continue
+
+        row = rows.iloc[0]
+        verdict = (
+            "CI excludes zero"
+            if row.ci_low > 0 or row.ci_high < 0
+            else "CI includes zero"
+        )
+        lines.append(f"- {estimator}: {fmt(row)} — {verdict}")
+
+    lines.extend([
+        "",
+        "Held-out data coverage:",
+        f"- Transitions in states with training support: "
+        f"{100 * diagnostics['test_share_in_supported_state']:.1f}%",
+        f"- State-action pairs observed in training: "
+        f"{100 * diagnostics['test_share_pairs_seen_in_train']:.1f}%",
+        f"- Greedy action matches logged action: "
+        f"{100 * diagnostics['test_agreement_greedy_vs_logged']:.1f}%",
+    ])
+
+    return lines
 
 
 def main():
@@ -409,22 +447,32 @@ def main():
     parser.add_argument(
         "--algorithm",
         choices=["q_learning", "double_q_learning"],
-        default="q_learning",
+        default="q_learning"
     )
-    parser.add_argument(
-        "--episodes",
-        type=int,
-        default=N_EPISODES,
-    )
+    parser.add_argument("--episodes", type=int, default=N_EPISODES)
     parser.add_argument("--checkpoints", type=int, default=50)
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--out", default="results_training")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--test-size", type=float, default=0.2)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--eval-epsilon", type=float, default=0.1)
+    parser.add_argument("--min-count", type=int, default=1)
+    parser.add_argument("--bootstrap", type=int, default=500)
 
     args = parser.parse_args()
 
     if args.episodes < 1 or args.checkpoints < 1 or args.samples < 1:
-        parser.error("episodes, checkpoints and samples must be positive.")
+        parser.error("--episodes, --checkpoints and --samples must be positive.")
+
+    if not 0 < args.test_size < 1:
+        parser.error("--test-size must be between 0 and 1.")
+
+    if not 0 < args.eval_epsilon <= 1:
+        parser.error("--eval-epsilon must be in (0, 1].")
+
+    if args.min_count < 1 or args.bootstrap < 0:
+        parser.error("--min-count must be >= 1 and --bootstrap >= 0.")
 
     np.random.seed(args.seed)
 
@@ -435,109 +483,223 @@ def main():
     model_dir.mkdir(parents=True, exist_ok=True)
     table_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load and validate the dataset.
+    # 1. Load and split by patient.
     df = load_dataset(args.data)
-    n_patients = int(df["patient_id"].nunique())
+    train_df, test_df = split_by_patient(
+        df,
+        args.test_size,
+        args.seed
+    )
+
+    if train_df.empty or test_df.empty:
+        raise ValueError("The patient-level split produced an empty partition.")
+
+    train_patients = sorted(train_df["patient_id"].unique().tolist())
+    test_patients = sorted(test_df["patient_id"].unique().tolist())
+
+    if set(train_patients) & set(test_patients):
+        raise ValueError("Patient leakage detected between train and test.")
+
+    split_info = {
+        "seed": args.seed,
+        "test_size": args.test_size,
+        "train_patients": train_patients,
+        "test_patients": test_patients,
+    }
+
+    (out / "split.json").write_text(
+        json.dumps(clean_for_json(split_info), indent=2),
+        encoding="utf-8"
+    )
+
+    n_train = len(train_patients)
+    n_test = len(test_patients)
 
     print(f"Algorithm: {args.algorithm}")
-    print(f"Loaded {len(df):,} transitions.")
-    print(f"Unique patients: {n_patients:,}")
+    print(
+        f"Loaded {len(df):,} transitions "
+        f"from {df['patient_id'].nunique():,} patients."
+    )
+    print(f"Train: {n_train:,} patients / {len(train_df):,} transitions")
+    print(f"Test:  {n_test:,} patients / {len(test_df):,} transitions")
     print(f"Training episodes: {args.episodes:,}")
 
-    # 2. Train the selected learner.
+    # 2. Train only on training patients.
     agent, checkpoints, train_seconds = train_agent(
-        df=df,
+        df=train_df,
         algorithm=args.algorithm,
         n_episodes=args.episodes,
-        n_checkpoints=args.checkpoints,
+        n_checkpoints=args.checkpoints
     )
 
-    checkpoints.to_csv(
-        table_dir / "checkpoints.csv",
-        index=False,
-    )
+    checkpoints.to_csv(table_dir / "checkpoints.csv", index=False)
 
-    # 3. Extract and save the effective Q-table.
+    # 3. Obtain the learned Q-table.
     Q = get_q_table(agent, args.algorithm)
-
-    np.save(
-        model_dir / f"{args.algorithm}_q_table.npy",
-        Q,
-    )
+    np.save(model_dir / f"{args.algorithm}_q_table.npy", Q)
 
     if args.algorithm == "double_q_learning":
         np.save(model_dir / "q_table_QA.npy", agent.QA)
         np.save(model_dir / "q_table_QB.npy", agent.QB)
 
-    get_policy_table(agent, Q).to_csv(
-        table_dir / f"policy_{args.algorithm}.csv",
-        index=False,
+    # 4. Calculate action support using TRAIN data only.
+    sa_counts = state_action_counts(
+        train_df,
+        N_STATES,
+        N_ACTIONS
     )
 
-    # 4. Export the Q-table and greedy policy for NetLogo.
-    export_policy_files(agent, Q, args.algorithm, out)
+    valid_actions = np.asarray(
+        sa_counts >= args.min_count,
+        dtype=bool
+    )
 
-    # 5. Save training histories.
+    if valid_actions.shape != (N_STATES, N_ACTIONS):
+        raise ValueError(
+            f"Expected action support shape {(N_STATES, N_ACTIONS)}, "
+            f"got {valid_actions.shape}."
+        )
+
+    policy, supported = greedy_policy(
+        Q,
+        sa_counts,
+        args.min_count
+    )
+
+    policy = np.asarray(policy, dtype=int)
+    supported = np.asarray(supported, dtype=bool)
+
+    if not np.all((policy >= 0) & (policy < N_ACTIONS)):
+        raise ValueError("The learned policy contains invalid action indices.")
+
+    np.save(model_dir / "valid_actions.npy", valid_actions)
+
+    print(
+        f"\nAction support: {int(valid_actions.sum())}/"
+        f"{N_STATES * N_ACTIONS} state-action pairs meet "
+        f"min_count={args.min_count}."
+    )
+
+    # 5. Export policy and Q-values.
+    policy_table = export_policy_files(
+        Q=Q,
+        algorithm=args.algorithm,
+        out=out,
+        sa_counts=sa_counts,
+        min_count=args.min_count
+    )
+
+    policy_table.to_csv(
+        table_dir / f"policy_{args.algorithm}.csv",
+        index=False
+    )
+
+    # 6. Save training histories.
     rewards = get_history(agent, "episode_rewards")
     lengths = get_history(agent, "episode_lengths")
     q_history = get_history(agent, "q_value_history")
 
+    if len(rewards) != args.episodes:
+        print(
+            f"Recorded {len(rewards):,} episodes; "
+            f"{args.episodes:,} were requested."
+        )
+
     history_length = min(len(rewards), len(lengths), len(q_history))
 
-    episodes_df = pd.DataFrame({
+    pd.DataFrame({
         "episode": np.arange(1, history_length + 1),
         "trajectory_return": rewards[:history_length],
         "trajectory_length": lengths[:history_length],
         "mean_Q": q_history[:history_length],
-    })
+    }).to_csv(table_dir / "episodes.csv", index=False)
 
-    episodes_df.to_csv(
-        table_dir / "episodes.csv",
-        index=False,
+    # 7. Logged-action agreement.
+    match_train = logged_action_agreement(policy, train_df)
+    match_test = logged_action_agreement(policy, test_df)
+
+    # 8. Off-policy evaluation on held-out patients.
+    gamma = (
+        args.gamma
+        if args.gamma is not None
+        else float(getattr(agent, "gamma", DEFAULT_GAMMA))
     )
 
-    # 6. Evaluate agreement with actions recorded in the dataset.
-    logged_action_match = evaluate_logged_actions(Q, df)
+    print(
+        f"\nOff-policy evaluation: gamma={gamma}, "
+        f"epsilon={args.eval_epsilon}, bootstrap={args.bootstrap}"
+    )
 
-    # 7. Evaluate the multi-agent system.
+    ope, ope_diag = run_ope(
+        train_df=train_df,
+        test_df=test_df,
+        Q=Q,
+        n_states=N_STATES,
+        n_actions=N_ACTIONS,
+        gamma=gamma,
+        epsilon=args.eval_epsilon,
+        min_count=args.min_count,
+        n_bootstrap=args.bootstrap,
+        seed=args.seed
+    )
+
+    ope.to_csv(table_dir / "ope.csv", index=False)
+
+    # 9. MAS evaluation using the same training-derived action mask.
     mas = MultiAgentSystem(
         q_agent=agent,
         use_double=(args.algorithm == "double_q_learning"),
+        valid_actions=valid_actions
     )
-
-    n_samples = min(args.samples, n_patients)
 
     mas_results = mas.evaluate_on_dataset(
-        df,
-        n_samples=n_samples,
-        verbose=False,
+        test_df,
+        n_samples=min(args.samples, n_test),
+        verbose=False
     )
 
-    mas_results.to_csv(
-        table_dir / "mas_evaluation.csv",
-        index=False,
-    )
+    mas_results.to_csv(table_dir / "mas_evaluation.csv", index=False)
 
-    # 8. Calculate summary metrics.
+    if len(mas_results):
+        action_match = float(
+            (
+                mas_results["original_action"]
+                == mas_results["mas_action"]
+            ).mean()
+        )
+
+        unanimous = float(
+            np.isclose(mas_results["consensus"], 1.0).mean()
+        )
+
+        proposal_accepted = float(
+            mas_results["q_proposed_matches_final"].mean()
+        )
+    else:
+        action_match = None
+        unanimous = None
+        proposal_accepted = None
+
     mas_metrics = {
         "n_samples": int(len(mas_results)),
-        "recorded_action_match_rate": (
-            float(
-                (mas_results["original_action"]
-                 == mas_results["mas_action"]).mean()
-            )
-            if len(mas_results) else None
-        ),
-        "unanimous_consensus_rate": (
-            float(mas_results["consensus"].mean())
-            if len(mas_results) else None
-        ),
-        "q_proposal_accepted_rate": (
-            float(mas_results["q_proposed_matches_final"].mean())
-            if len(mas_results) else None
-        ),
+        "recorded_action_match_rate": action_match,
+        "unanimous_consensus_rate": unanimous,
+        "q_proposal_accepted_rate": proposal_accepted,
     }
 
+    # 10. Transition matrices from TRAIN patients only.
+    transition_counts, transition_matrices = build_transition_matrices(
+        train_df
+    )
+
+    export_transition_matrices(
+        counts=transition_counts,
+        matrices=transition_matrices,
+        model_dir=model_dir,
+        out=out
+    )
+
+    # 11. Summary.
     summary = {
         "algorithm": args.algorithm,
         "episodes_requested": args.episodes,
@@ -545,7 +707,9 @@ def main():
         "dataset": {
             "path": args.data,
             "n_transitions": int(len(df)),
-            "n_patients": n_patients,
+            "n_patients": int(df["patient_id"].nunique()),
+            "n_train_patients": n_train,
+            "n_test_patients": n_test,
         },
         "training": {
             "seconds": float(train_seconds),
@@ -553,85 +717,93 @@ def main():
             "mean_Q": float(Q.mean()),
             "max_Q": float(Q.max()),
             "mean_max_Q": float(Q.max(axis=1).mean()),
-            "logged_action_match_rate": logged_action_match,
+            "logged_action_match_train": match_train,
+            "logged_action_match_test": match_test,
+            "min_count": args.min_count,
+            "supported_state_action_pairs": int(valid_actions.sum()),
         },
-        "mas_evaluation": mas_metrics,
+        "off_policy_evaluation": {
+            "diagnostics": ope_diag,
+            "estimates": ope.to_dict("records"),
+        },
+        "mas_evaluation_test_patients": mas_metrics,
     }
 
     (out / "summary.json").write_text(
-        json.dumps(summary, indent=2, allow_nan=False),
-        encoding="utf-8",
+        json.dumps(clean_for_json(summary), indent=2, allow_nan=False),
+        encoding="utf-8"
     )
 
-    # 9. Generate report.
-    report = f"""# Training and Multi-Agent System Evaluation
+    # 12. Markdown report.
+    def pct(value):
+        return f"{100 * value:.2f}%" if value is not None else "N/A"
 
-## Algorithm
-- Selected algorithm: {args.algorithm}
-- Episodes requested: {args.episodes:,}
-- Episodes recorded: {len(rewards):,}
-- Training time: {train_seconds:.2f} seconds
-
-## Dataset
-- Transitions: {len(df):,}
-- Unique patients: {n_patients:,}
-
-## Learned policy
-- Mean Q-value: {Q.mean():.4f}
-- Maximum Q-value: {Q.max():.4f}
-- Mean maximum Q-value per state: {Q.max(axis=1).mean():.4f}
-- Agreement with recorded actions: {100 * logged_action_match:.2f}%
-
-## Multi-agent evaluation
-- Patients evaluated: {len(mas_results)}
-- MAS action matches recorded action: {
-        f"{100 * mas_metrics['recorded_action_match_rate']:.2f}%"
-        if mas_metrics["recorded_action_match_rate"] is not None
-        else "N/A"
-    }
-- Unanimous consensus: {
-        f"{100 * mas_metrics['unanimous_consensus_rate']:.2f}%"
-        if mas_metrics["unanimous_consensus_rate"] is not None
-        else "N/A"
-    }
-- Q-learning proposal accepted as final action: {
-        f"{100 * mas_metrics['q_proposal_accepted_rate']:.2f}%"
-        if mas_metrics["q_proposal_accepted_rate"] is not None
-        else "N/A"
-    }
-
-## Output files
-- models/{args.algorithm}_q_table.npy
-- tables/policy_{args.algorithm}.csv
-- tables/checkpoints.csv
-- tables/episodes.csv
-- tables/mas_evaluation.csv
-- netlogo/{args.algorithm}_Q_values.csv
-- netlogo/{args.algorithm}_policy.csv
-- summary.json
-- report.md
-
-Action agreement and consensus measure model behavior, not clinical effectiveness.
-This system is a research prototype and does not provide clinical treatment recommendations.
-"""
+    report_lines = [
+        "# Training and Multi-Agent System Evaluation",
+        "",
+        "## Algorithm",
+        f"- Algorithm: {args.algorithm}",
+        f"- Episodes requested: {args.episodes:,}",
+        f"- Episodes recorded: {len(rewards):,}",
+        f"- Training time: {train_seconds:.2f} seconds",
+        "",
+        "## Dataset split",
+        f"- Total transitions: {len(df):,}",
+        f"- Training patients: {n_train:,}",
+        f"- Test patients: {n_test:,}",
+        f"- Random seed: {args.seed}",
+        "",
+        "## Learned policy",
+        f"- Mean Q-value: {Q.mean():.4f}",
+        f"- Maximum Q-value: {Q.max():.4f}",
+        f"- Mean maximum Q-value per state: {Q.max(axis=1).mean():.4f}",
+        f"- Training logged-action agreement: {100 * match_train:.2f}%",
+        f"- Test logged-action agreement: {100 * match_test:.2f}%",
+        f"- Minimum action support count: {args.min_count}",
+        f"- Supported state-action pairs: {int(valid_actions.sum())}",
+        "",
+        "## Off-policy evaluation",
+        "",
+        *ope_report_lines(ope, ope_diag),
+        "",
+        "## Multi-agent evaluation",
+        f"- Patients evaluated: {len(mas_results)}",
+        f"- MAS action matches recorded action: {pct(action_match)}",
+        f"- Unanimous agent consensus: {pct(unanimous)}",
+        f"- Q-learning proposal retained: {pct(proposal_accepted)}",
+        "",
+        "## Output files",
+        f"- models/{args.algorithm}_q_table.npy",
+        "- models/valid_actions.npy",
+        "- models/transition_matrices.npz",
+        "- models/q_table_QA.npy and models/q_table_QB.npy (Double Q-Learning)",
+        f"- netlogo/{args.algorithm}_Q_values.csv",
+        f"- netlogo/{args.algorithm}_policy.csv",
+        "- netlogo/transition_matrices.csv",
+        f"- tables/policy_{args.algorithm}.csv",
+        "- tables/checkpoints.csv",
+        "- tables/episodes.csv",
+        "- tables/ope.csv",
+        "- tables/mas_evaluation.csv",
+        "- split.json",
+        "- summary.json",
+        "- report.md",
+        "",
+    ]
 
     (out / "report.md").write_text(
-        report,
-        encoding="utf-8",
+        "\n".join(report_lines),
+        encoding="utf-8"
     )
 
     print("\nTraining and evaluation complete.")
     print(f"Algorithm: {args.algorithm}")
-    print(f"Logged-action agreement: {100 * logged_action_match:.2f}%")
-    # 9. Build and export transition matrices.
-    transition_counts, transition_matrices = build_transition_matrices(df)
-
-    export_transition_matrices(
-        counts=transition_counts,
-        matrices=transition_matrices,
-        model_dir=model_dir,
-        out=out,
+    print(
+        f"Logged-action agreement: train {100 * match_train:.2f}% / "
+        f"test {100 * match_test:.2f}%"
     )
+    print(f"MAS action agreement: {pct(action_match)}")
+    print(f"Unanimous consensus: {pct(unanimous)}")
     print(f"Results saved to: {out.resolve()}")
 
 
