@@ -1,6 +1,6 @@
-
 from pathlib import Path
 import re
+import time
 
 import numpy as np
 import pandas as pd
@@ -315,12 +315,16 @@ h1, h2, h3 { color: #123d32; }
 # LOAD THE EXISTING TRAINED POLICIES
 # ============================================================
 
+_t_load_start = time.perf_counter()
+
 q_policy, q_source = load_policy(
     "q_learning_policy.csv", "Q-Learning"
 )
 double_policy, double_source = load_policy(
     "double_q_learning_policy.csv", "Double Q-Learning"
 )
+
+POLICY_LOAD_MS = (time.perf_counter() - _t_load_start) * 1000
 
 # ============================================================
 # NAVIGATION
@@ -344,6 +348,7 @@ with st.sidebar.expander("Loaded model files"):
     st.code(q_source)
     st.write("Double Q-Learning")
     st.code(double_source)
+    st.caption(f"Policy load time (this run): {POLICY_LOAD_MS:.2f} ms")
 
 # ============================================================
 # PATIENT ASSESSMENT
@@ -447,6 +452,8 @@ if page == "Patient Assessment":
         )
 
     if submitted:
+        t_start = time.perf_counter()
+
         mapped_site = (
             "None" if metastatic_site == "Unknown"
             else metastatic_site
@@ -459,6 +466,16 @@ if page == "Patient Assessment":
             previous_treatments=previous_treatments,
         )
 
+        t_encoding = time.perf_counter() - t_start
+
+        # Time the policy lookups
+        t_lookup_start = time.perf_counter()
+        _ = {
+            "Q-Learning": get_action(q_policy, state_id),
+            "Double Q-Learning": get_action(double_policy, state_id),
+        }
+        t_lookup = time.perf_counter() - t_lookup_start
+
         st.session_state["case_result"] = {
             "case_name": case_name.strip() or "Unnamed case",
             "cancer_type": cancer_type,
@@ -470,6 +487,10 @@ if page == "Patient Assessment":
             "model_choice": model_choice,
             "state_id": state_id,
             "encoded": encoded,
+            "timing": {
+                "encoding_ms": t_encoding * 1000,
+                "lookup_ms": t_lookup * 1000,
+            },
         }
 
     case = st.session_state.get("case_result")
@@ -585,9 +606,16 @@ if page == "Patient Assessment":
         # Multi-Agent Tumor Board Consensus
         st.markdown("### 🤖 Multi-Agent Tumor Board Consensus")
         algo_choice = "q_learning" if case["model_choice"] == "Q-Learning" else "double_q_learning"
+
+        t_mas_start = time.perf_counter()
         mas = load_multi_agent_system(algorithm=algo_choice)
+        t_mas_load = time.perf_counter() - t_mas_start
+
+        mas_decision = None
+        t_mas_decide = 0.0
 
         if mas is not None:
+            t_decide_start = time.perf_counter()
             mas_decision = mas.decide({
                 "cancer_type": case["cancer_type"],
                 "stage": case["stage"],
@@ -597,7 +625,9 @@ if page == "Patient Assessment":
                 "state_tuple": (encoded["D"], encoded["P"], encoded["U"], encoded["B"]),
                 "state_index": case["state_id"],
             })
+            t_mas_decide = time.perf_counter() - t_decide_start
 
+        if mas_decision is not None:
             if mas_decision.get("vetoed"):
                 st.warning(
                     f"🚨 **Clinical Specialist Guardrail Override:** {mas_decision.get('veto_reason')}\n\n"
@@ -637,6 +667,32 @@ if page == "Patient Assessment":
                 treat_eval = assessments.get("TreatmentAgent", {})
                 st.metric("Proposed Action", mas_decision["proposed_action_name"])
                 st.caption(f"Evaluated via {mas_decision.get('agent_type', 'RL')}")
+        else:
+            st.warning(
+                "The Multi-Agent Tumor Board could not be loaded, "
+                "so no consensus is available."
+            )
+
+        # Execution time summary
+        st.markdown("### ⏱️ Execution Time")
+        timing = case.get("timing", {})
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("State encoding", f"{timing.get('encoding_ms', 0):.3f} ms")
+        t2.metric("Policy lookup", f"{timing.get('lookup_ms', 0):.3f} ms")
+        t3.metric("Tumor Board load", f"{t_mas_load * 1000:.1f} ms")
+        t4.metric("Tumor Board decision", f"{t_mas_decide * 1000:.3f} ms")
+
+        total_ms = (
+            timing.get("encoding_ms", 0)
+            + timing.get("lookup_ms", 0)
+            + t_mas_load * 1000
+            + t_mas_decide * 1000
+        )
+        st.caption(
+            f"Total pipeline time: {total_ms:.2f} ms. "
+            "Model loading is cached by Streamlit, so the Tumor Board load "
+            "time is only large on the first run."
+        )
 
         with st.expander("Case data"):
             st.json({
@@ -658,6 +714,8 @@ elif page == "Policy Comparison":
             "Check the loaded model paths in the sidebar."
         )
     else:
+        t0 = time.perf_counter()
+
         comparison = pd.DataFrame({"state_id": range(32)})
 
         q_map = q_policy.set_index("state_id")["action_id"]
@@ -683,6 +741,10 @@ elif page == "Policy Comparison":
         c.metric(
             "Agreement",
             f"{matches / compared * 100:.1f}%" if compared else "N/A",
+        )
+
+        st.caption(
+            f"Comparison computed in {(time.perf_counter() - t0) * 1000:.2f} ms"
         )
 
         st.subheader("Full policy comparison")
@@ -1011,6 +1073,7 @@ elif page == "Model Index & Theory":
         st.subheader("3. Interactive Transition Matrix Heatmap by Action")
 
         # Load transition matrix from results_training
+        t0 = time.perf_counter()
         npz_file = locate_file("transition_matrices.npz")
         if npz_file and npz_file.exists():
             matrix_data = np.load(npz_file)
@@ -1049,6 +1112,9 @@ elif page == "Model Index & Theory":
                 margin=dict(l=40, r=40, t=30, b=40),
             )
             st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                f"Matrix loaded and figure built in {(time.perf_counter() - t0) * 1000:.1f} ms"
+            )
         else:
             st.warning("Transition matrix file (transition_matrices.npz) not found in results_training.")
 
@@ -1106,11 +1172,13 @@ elif page == "Model Index & Theory":
         with r_c3:
             calc_to = st.selectbox("Destination State (s_to)", list(range(32)), format_func=lambda i: f"S{i:02d} - {state_to_label(i)[:25]}...", index=6)
 
+        t0 = time.perf_counter()
         q_from = get_state_quality(calc_from)
         q_to = get_state_quality(calc_to)
         delta_q = q_to - q_from
         cost_penalty = -1.0 if calc_act > 0 else 0.0
         computed_r = compute_reward(calc_from, calc_act, calc_to)
+        reward_time_ms = (time.perf_counter() - t0) * 1000
 
         st.markdown(f"""
         * **Origin Health Score $Q(s)$: ** `{q_from:.1f}`
@@ -1119,6 +1187,7 @@ elif page == "Model Index & Theory":
         * **Action Toxicity Penalty: ** `{cost_penalty:.1f}`
         * **Calculated Total Reward $R(s, a, s')$: ** **`{computed_r:+.1f}`**
         """)
+        st.caption(f"Reward computed in {reward_time_ms:.4f} ms")
 
         cost_str = " - 1.0" if calc_act > 0 else " + 0.0"
         if calc_to == 6:
@@ -1143,4 +1212,3 @@ elif page == "Model Index & Theory":
         st.caption(
             "With discount factor $\\gamma = 0.95$, the policy balances short-term therapy burden against long-term disease remission and survival."
         )
-
